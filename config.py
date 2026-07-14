@@ -1,99 +1,125 @@
-"""Configuration for the single-city network SIR simulation.
+"""Configuration for the single-city SEIR simulation.
 
-Stores every simulation parameter in one immutable configuration object.
-Design note for future multi-city work
----
-In Milestone 1 there is exactly one :class:`Config` per run. In the eventual
-regional model, each ``City`` object will own its *own* :class:`Config`
-instance (different populations, contact rates, etc.), and a separate mobility
-layer will sit on top. Nothing in this class assumes a single global city, so
-it can be instantiated many times without modification.
+All tunable parameters live in one immutable :class:`Config` object so that a
+run is fully described by a single value and identical configurations (same
+``random_seed`` included) reproduce identical simulations.
 
+Scope of this milestone
+------------------------
+This milestone validates the **disease progression engine** on a small,
+*well-mixed* virtual city (~50 people): every day anyone may interact with
+anyone. The contact network (Watts-Strogatz) is intentionally **not** built
+yet. Because who-meets-whom is isolated behind the interaction layer
+(:mod:`interaction`), introducing the network later changes only that layer --
+these parameters and the disease dynamics stay as they are.
 
-Fields:
-population_size: int
-average_contacts: int
-rewiring_probability: float
-infection_probability: float
-recovery_probability: float
-initial_infected: int
-simulation_days: int
-random_seed: int
-(animation_speed: int) if turning into gif after modeling
-
-Possibly also:
-show_geographic: bool
-show_plots: bool
+Design note for future work
+----------------------------
+In the eventual regional model each ``City`` will own its own :class:`Config`
+instance, and a mobility layer will sit on top. Nothing here assumes a single
+global city, so :class:`Config` can be instantiated many times unchanged.
 """
 
-from dataclasses import dataclass, asdict, replace
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, replace
+from typing import Any, Dict
+
 
 @dataclass(frozen=True)
 class Config:
     """Immutable bundle of simulation parameters.
 
-    Every value has a sensible default chosen to produce a clear, textbook
-    epidemic curve on a small-world network. The class is frozen (immutable)
-    so that a configuration cannot be accidentally mutated mid-run; use
-    :meth:`with_overrides` to derive a modified copy.
+    Attributes:
+        population_size: Number of individuals in the city.
+        daily_contacts: How many other people each *infectious* individual
+            interacts with per day in the well-mixed model.
+        infection_probability: Probability that a single S<-I interaction
+            results in transmission (the new case enters ``EXPOSED``).
+        incubation_days: Days spent ``EXPOSED`` (infected but not yet
+            infectious) before becoming ``INFECTIOUS``.
+        infectious_days: Days spent ``INFECTIOUS`` before ``RECOVERED``.
+        simulation_days: Upper bound on days to simulate; the run also stops
+            early once no ``EXPOSED`` or ``INFECTIOUS`` individuals remain.
+        random_seed: Seed for the single NumPy ``Generator`` driving *all*
+            randomness, guaranteeing reproducibility.
+        initial_infected: Number of initial cases (seeded as ``EXPOSED`` on
+            day 0, matching the ``S -> E`` start of a patient-zero timeline).
 
-    Epidemiological parameters
-    ---
-    infection_probability:
-        Probability that a single Infected node transmits to a single
-        Susceptible neighbour on a given day (a per-contact, per-day rate).
-    recovery_probability:
-        Probability that an Infected node recovers on a given day. Its
-        reciprocal ``1 / recovery_probability`` is the mean infectious period
-        in days.
+    A rough basic reproduction number for a well-mixed population is::
 
-    A useful sanity check is the basic reproduction number, approximated on a
-    network as::
+        R0 ~= infection_probability * daily_contacts * infectious_days
 
-        R0 ~= infection_probability * average_contacts / recovery_probability
-
-    With the defaults below this is roughly 3.0, which yields a pronounced
-    outbreak that does not immediately infect everyone.
+    With the defaults this is about 2.4, enough to produce a clear outbreak in
+    a fully susceptible population of 50 without instantly infecting everyone.
     """
 
-    # --- Network / population --------------------------------------------
-    population_size: int = 1000 # Number of nodes in one population
-
-    average_contacts: int = 5 # Mean num of social contacts per person
-
-    """
-    Must be an even integer >= 2 and < ``population_size`` because the
-    Watts-Strogatz construction connects each node to ``k/2`` neighbours on
-    each side of a ring before rewiring.
-    """
-
-    rewiring_probability: float = 0.1
-    """Watts-Strogatz rewiring probability (``beta``), in ``[0, 1]``.
-
-    ``0`` gives a pure ring lattice (tight local communities, no shortcuts);
-    ``1`` gives an essentially random graph. Small values (~0.1) create the
-    "small-world" regime: strong local clustering (neighbourhoods, schools,
-    workplaces) plus a few long-range links (occasional outside contact).
-    """
+    # --- Population / interaction ----------------------------------------
+    population_size: int = 50
+    daily_contacts: int = 8
 
     # --- Disease dynamics -------------------------------------------------
-    infection_probability: float = 0.08 # Per-contact, per-day transmission probability in [0, 1]
-
-    recovery_probability: float = 0.1 # Recovery confers immunity
-
-    initial_infected: int = 5 # Start off a small number for sensible outcome
+    infection_probability: float = 0.05
+    incubation_days: int = 2
+    infectious_days: int = 6
+    initial_infected: int = 1
 
     # --- Run control ------------------------------------------------------
-    simulation_days: int = 160 # Maximum days to model
+    simulation_days: int = 120
+    random_seed: int = 42
 
-    """
-    The driver loop stops early once no infected individuals remain, so this is
-    an upper bound; the default outbreak typically resolves well before it.
-    """
+    def __post_init__(self) -> None:
+        """Validate parameters, raising ``ValueError`` on nonsensical input.
 
-    random_seed: int = 42 # Seed for all randomness (network build, seeding, transmission)
+        Failing at construction time keeps a broken configuration from silently
+        producing meaningless results.
+        """
+        if self.population_size < 2:
+            raise ValueError("population_size must be >= 2.")
+        if not 1 <= self.daily_contacts <= self.population_size - 1:
+            raise ValueError(
+                "daily_contacts must be between 1 and population_size - 1."
+            )
+        if not 0.0 <= self.infection_probability <= 1.0:
+            raise ValueError("infection_probability must be in [0, 1].")
+        if self.incubation_days < 1:
+            raise ValueError("incubation_days must be >= 1.")
+        if self.infectious_days < 1:
+            raise ValueError("infectious_days must be >= 1.")
+        if not 1 <= self.initial_infected <= self.population_size:
+            raise ValueError(
+                "initial_infected must be between 1 and population_size."
+            )
+        if self.simulation_days < 1:
+            raise ValueError("simulation_days must be >= 1.")
 
-    """
-    A fixed seed makes every run fully reproducible. Use ``None`` for
-    nondeterministic behaviour.
-    """
+    def with_overrides(self, **overrides: Any) -> "Config":
+        """Return a new :class:`Config` with the given fields replaced.
+
+        Because :class:`Config` is frozen, this is the supported way to derive
+        a variant (e.g. a more transmissible scenario)::
+
+            fast = base.with_overrides(infection_probability=0.1)
+
+        Args:
+            **overrides: Field names mapped to new values.
+
+        Returns:
+            A validated new configuration instance.
+        """
+        return replace(self, **overrides)
+
+    def as_dict(self) -> Dict[str, Any]:
+        """Return the configuration as a plain dictionary (for logging/export)."""
+        return asdict(self)
+
+    def estimated_r0(self) -> float:
+        """Return a back-of-the-envelope basic reproduction number.
+
+        Not used to drive the simulation; provided only to help interpret
+        parameters::
+
+            R0 ~= infection_probability * daily_contacts * infectious_days
+        """
+        return (self.infection_probability * self.daily_contacts
+                * self.infectious_days)

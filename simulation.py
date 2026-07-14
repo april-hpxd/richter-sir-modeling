@@ -1,54 +1,168 @@
-"""
-Ties the three ingredients of Milestone 1 together:
+"""Simulation orchestration and day-by-day history recording.
 
-* a contact network (from :mod:`network_generator`),
-* an SIR disease engine (from :mod:`sir_engine`),
-* and a recorded day-by-day history of the outbreak.
+:class:`Simulation` wires the configuration, the interaction layer, and the
+disease engine together, runs the outbreak, and records a :class:`DailyRecord`
+for every day. It owns the single NumPy :class:`~numpy.random.Generator` that
+drives *all* randomness in the run (seeding, contacts, transmission), which is
+what makes a given :class:`~config.Config` perfectly reproducible.
 
-It exposes a small, deliberate API: build once, then either :meth:`run` the
-whole epidemic or drive it one :meth:`step` at a time (the latter is what the
-live animation uses). After each day it snapshots the compartment counts and a
-copy of every node's state, so visualization and statistics can replay the
-outbreak without re-running it.
-
+Like the engine, this class is deliberately self-contained -- it holds its own
+population, RNG, and history and reaches out to no global state -- so it can
+later be renamed/wrapped as a ``City`` and instantiated many times.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import List
+
+import numpy as np
+
+from config import Config
+from disease_model import State
+from engine import DiseaseEngine
+from interaction import WellMixedContactModel
 
 
 @dataclass
-class DayRecord:
-    """Immutable snapshot of the epidemic at the end of one day.
+class DailyRecord:
+    """Snapshot of the epidemic on a single day.
 
     Attributes:
-        day: The day index (0 is the initial seeded state, before any step).
-        susceptible: Number of Susceptible individuals.
-        infected: Number of Infected individuals.
-        recovered: Number of Recovered individuals.
-        new_infections: Individuals who became infected *on* this day.
-        new_recoveries: Individuals who recovered *on* this day.
-        states: A copy of every node's :class:`State` at end of day, so the
-            spatial spread can be re-drawn frame by frame after the run.
+        day: The day index (``0`` is the seeded initial state, before any step).
+        susceptible: Number of ``SUSCEPTIBLE`` individuals.
+        exposed: Number of ``EXPOSED`` (incubating) individuals.
+        infectious: Number of ``INFECTIOUS`` individuals.
+        recovered: Number of ``RECOVERED`` individuals.
+        new_exposed: Individuals newly exposed on this day.
+        new_infectious: Individuals who became infectious on this day.
+        new_recovered: Individuals who recovered on this day.
     """
 
     day: int
     susceptible: int
-    infected: int
+    exposed: int
+    infectious: int
     recovered: int
-    new_infections: int
-    new_recoveries: int
-    states: Dict[int, State] = field(repr=False)
+    new_exposed: int
+    new_infectious: int
+    new_recovered: int
 
 
 class Simulation:
-    """Run and record a single-city network SIR epidemic.
+    """Run and record a single-city SEIR epidemic in a well-mixed population.
 
     Attributes:
         config: The configuration governing this run.
-        graph: The contact network (built at construction).
-        engine: The :class:`SIREngine` advancing the disease.
-        history: List of :class:`DayRecord`, one per day including day 0.
+        rng: The single shared NumPy generator for all randomness.
+        engine: The :class:`~engine.DiseaseEngine` advancing the disease.
+        history: One :class:`DailyRecord` per day, including day 0.
+        state_frames: One per-individual state snapshot per day, aligned with
+            ``history``; consumed by the visualization to animate colour
+            changes. Kept separate from :class:`DailyRecord` so the record
+            stays a clean numeric summary.
     """
+
+    def __init__(self, config: Config) -> None:
+        """Build the interaction layer and engine, then seed initial cases.
+
+        Args:
+            config: Simulation parameters.
+        """
+        self.config = config
+        self.rng = np.random.default_rng(config.random_seed)
+
+        contact_model = WellMixedContactModel(
+            population_size=config.population_size,
+            daily_contacts=config.daily_contacts,
+        )
+        self.engine = DiseaseEngine(
+            population_size=config.population_size,
+            contact_model=contact_model,
+            infection_probability=config.infection_probability,
+            incubation_days=config.incubation_days,
+            infectious_days=config.infectious_days,
+            rng=self.rng,
+        )
+
+        # Seed patient zeros as EXPOSED and record the day-0 baseline.
+        self.engine.seed_exposed(config.initial_infected)
+        self.history: List[DailyRecord] = []
+        self.state_frames: List[List[State]] = []
+        self._record(new_exposed=config.initial_infected,
+                     new_infectious=0, new_recovered=0)
+
+    # ------------------------------------------------------------------
+    # Driving the simulation
+    # ------------------------------------------------------------------
+    def step(self) -> DailyRecord:
+        """Advance the epidemic by one day and record it.
+
+        Returns:
+            The :class:`DailyRecord` for the day just simulated.
+        """
+        delta = self.engine.step()
+        return self._record(
+            new_exposed=delta["new_exposed"],
+            new_infectious=delta["new_infectious"],
+            new_recovered=delta["new_recovered"],
+        )
+
+    def run(self, verbose: bool = False) -> List[DailyRecord]:
+        """Run the epidemic to completion and return the full history.
+
+        Stops once no ``EXPOSED`` or ``INFECTIOUS`` individuals remain (the
+        state can no longer change) or after ``simulation_days`` days.
+
+        Args:
+            verbose: If ``True``, print a one-line summary of each day.
+
+        Returns:
+            The complete history, including the day-0 baseline.
+        """
+        for _ in range(self.config.simulation_days):
+            record = self.step()
+            if verbose:
+                print(
+                    f"Day {record.day:3d} | "
+                    f"S={record.susceptible:3d} "
+                    f"E={record.exposed:3d} "
+                    f"I={record.infectious:3d} "
+                    f"R={record.recovered:3d} "
+                    f"(+{record.new_exposed} exposed)"
+                )
+            if not self.engine.is_epidemic_active():
+                break
+        return self.history
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+    def _record(self, new_exposed: int, new_infectious: int,
+                new_recovered: int) -> DailyRecord:
+        """Capture the current engine state as a :class:`DailyRecord`.
+
+        Also appends the per-individual state snapshot to ``state_frames``.
+
+        Args:
+            new_exposed: New exposures attributed to this day.
+            new_infectious: New infectious conversions this day.
+            new_recovered: New recoveries this day.
+
+        Returns:
+            The appended :class:`DailyRecord`.
+        """
+        counts = self.engine.counts()
+        record = DailyRecord(
+            day=self.engine.day,
+            susceptible=counts["S"],
+            exposed=counts["E"],
+            infectious=counts["I"],
+            recovered=counts["R"],
+            new_exposed=new_exposed,
+            new_infectious=new_infectious,
+            new_recovered=new_recovered,
+        )
+        self.history.append(record)
+        self.state_frames.append(self.engine.states())
+        return record

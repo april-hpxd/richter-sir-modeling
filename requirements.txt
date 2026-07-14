@@ -1,8 +1,9 @@
-# Milestone 1 dependencies
-networkx>=3.0
+# Dependencies for the SEIR well-mixed milestone.
 numpy>=1.24
-scipy>=1.10
 matplotlib>=3.7
 
-# Optional? saving animations as MP4 requires an ffmpeg binary on PATH.
-# GIF export works out of the box via matplotlib's Pillow writer.
+# Saving the animation as a GIF works out of the box via matplotlib's Pillow
+# writer (Pillow ships with matplotlib).
+
+# Not needed yet: networkx / scipy return in the next milestone, when the
+# well-mixed interaction layer is replaced by a Watts-Strogatz contact network.
