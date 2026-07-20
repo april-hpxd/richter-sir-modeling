@@ -36,7 +36,11 @@ class Config:
             randomness, guaranteeing reproducibility.
         initial_infected: Number of initial cases (seeded as ``EXPOSED`` on
             day 0, matching the ``S -> E`` start of a patient-zero timeline).
-        contact_model: Which contact model to use: "well-mixed" or "watts-strogatz".
+        contact_model: Which contact model to use: "random-network",
+            "well-mixed", or "watts-strogatz".
+        random_degree_min/random_degree_max: Inclusive bounds for the number
+            of persistent contacts assigned to every person in a seeded random
+            contact graph.
         watts_strogatz_k: For Watts-Strogatz networks, the neighbourhood size.
         watts_strogatz_p: For Watts-Strogatz networks, the rewiring probability.
 
@@ -44,7 +48,8 @@ class Config:
         number_of_cities: How many independent cities in the regional simulation.
         population_per_city: Number of individuals per city (overrides
             ``population_size`` when running regionally).
-        travel_fraction: Fraction of the population eligible to travel (0.0 to 1.0).
+        travel_fraction: Fraction of the population eligible to travel (0.0 to
+            0.5, so at most half a city's residents can travel).
         daily_travel_rate: Fraction of eligible travelers who actually travel
             on a given day (0.0 to 1.0).
 
@@ -52,9 +57,9 @@ class Config:
 
         R0 ~= infection_probability * mean_contacts * infectious_days
 
-    where ``mean_contacts`` is the network mean degree ``k`` for the
-    Watts-Strogatz model (or ``daily_contacts`` when well-mixed). With the
-    defaults this is about 2.9 -- enough to produce a clear outbreak in the
+    where ``mean_contacts`` is the mean degree for a network model (or
+    ``daily_contacts`` when well-mixed). With the defaults this is about 1.4 --
+    enough to produce a clear outbreak in the
     seeded city and to reliably carry infection to the other city via travel,
     while still leaving some individuals uninfected.
     """
@@ -62,7 +67,9 @@ class Config:
     # --- Population / interaction ----------------------------------------
     population_size: int = 50
     daily_contacts: int = 8
-    contact_model: str = "watts-strogatz"
+    contact_model: str = "random-network"
+    random_degree_min: int = 1
+    random_degree_max: int = 7
     watts_strogatz_k: int = 8
     watts_strogatz_p: float = 0.1
 
@@ -94,8 +101,17 @@ class Config:
             raise ValueError(
                 "daily_contacts must be between 1 and population_size - 1."
             )
-        if self.contact_model not in ("well-mixed", "watts-strogatz"):
-            raise ValueError("contact_model must be 'well-mixed' or 'watts-strogatz'.")
+        if self.contact_model not in ("random-network", "well-mixed", "watts-strogatz"):
+            raise ValueError(
+                "contact_model must be 'random-network', 'well-mixed', "
+                "or 'watts-strogatz'."
+            )
+        if self.random_degree_min < 1:
+            raise ValueError("random_degree_min must be >= 1.")
+        if self.random_degree_max < self.random_degree_min:
+            raise ValueError(
+                "random_degree_max must be >= random_degree_min."
+            )
         if self.watts_strogatz_k < 1:
             raise ValueError("watts_strogatz_k must be >= 1.")
         if not 0.0 <= self.watts_strogatz_p <= 1.0:
@@ -116,8 +132,8 @@ class Config:
             raise ValueError("number_of_cities must be >= 1.")
         if self.population_per_city < 2:
             raise ValueError("population_per_city must be >= 2.")
-        if not 0.0 <= self.travel_fraction <= 1.0:
-            raise ValueError("travel_fraction must be in [0, 1].")
+        if not 0.0 <= self.travel_fraction <= 0.5:
+            raise ValueError("travel_fraction must be in [0, 0.5].")
         if not 0.0 <= self.daily_travel_rate <= 1.0:
             raise ValueError("daily_travel_rate must be in [0, 1].")
 
@@ -153,6 +169,8 @@ class Config:
         """
         if self.contact_model == "watts-strogatz":
             mean_contacts = self.watts_strogatz_k
+        elif self.contact_model == "random-network":
+            mean_contacts = (self.random_degree_min + self.random_degree_max) / 2
         else:
             mean_contacts = self.daily_contacts
         return (self.infection_probability * mean_contacts

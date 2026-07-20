@@ -5,12 +5,14 @@ disease engine never decides *how* people come into contact; it only asks a
 :class:`ContactModel` "who does person ``i`` interact with today?" and applies
 transmission along whatever ids come back.
 
-Two implementations ship here:
+Three implementations ship here:
 
 * :class:`WellMixedContactModel` -- any individual may meet any other
   (homogeneous-mixing assumption; used for validation).
 * :class:`WattsStrogatzContactModel` -- each person's contacts are their
   neighbours in a small-world network graph.
+* :class:`RandomNetworkContactModel` -- a seeded, persistent random graph in
+  which each person has a random degree within configured bounds.
 
 All randomness flows through a single NumPy :class:`~numpy.random.Generator`
 passed in by the caller, so contact draws stay part of the one reproducible
@@ -23,6 +25,7 @@ from abc import ABC, abstractmethod
 
 import networkx as nx
 import numpy as np
+from networkx.algorithms.graphical import is_graphical
 from numpy.random import Generator
 
 
@@ -153,3 +156,64 @@ class WattsStrogatzContactModel(ContactModel):
         """
         neighbors = list(self.graph.neighbors(individual_id))
         return np.array(neighbors, dtype=np.int64)
+
+
+class RandomNetworkContactModel(ContactModel):
+    """A seeded undirected social graph with bounded random node degrees.
+
+    Each resident is assigned a degree drawn uniformly from ``min_degree`` to
+    ``max_degree`` (inclusive), subject to the graph being feasible.  A simple
+    graph with exactly those degrees is then built and rewired, so the visible
+    links are persistent social contacts rather than new random dots each day.
+    """
+
+    def __init__(self, population_size: int, min_degree: int = 1,
+                 max_degree: int = 7, rng: Generator | None = None) -> None:
+        if rng is None:
+            rng = np.random.default_rng()
+        if population_size < 2:
+            raise ValueError("population_size must be >= 2.")
+
+        self.population_size = population_size
+        self.min_degree = min(min_degree, population_size - 1)
+        self.max_degree = min(max_degree, population_size - 1)
+        if self.min_degree < 1 or self.max_degree < self.min_degree:
+            raise ValueError("Invalid random-network degree bounds.")
+
+        degrees = self._graphical_degree_sequence(rng)
+        self.graph = nx.havel_hakimi_graph(degrees)
+
+        # Havel-Hakimi provides the exact requested degrees.  Degree-preserving
+        # swaps remove its construction-order bias while keeping the run seeded.
+        swaps = max(1, self.graph.number_of_edges() * 3)
+        try:
+            nx.double_edge_swap(
+                self.graph, nswap=swaps, max_tries=swaps * 20,
+                seed=int(rng.integers(0, 2**31)),
+            )
+        except nx.NetworkXAlgorithmError:
+            # A very small/dense graph may not admit enough swaps; its valid
+            # Havel-Hakimi graph still has the promised degree for every node.
+            pass
+
+    def _graphical_degree_sequence(self, rng: Generator) -> list[int]:
+        """Draw a feasible degree for every node without relaxing the bounds."""
+        for _ in range(1_000):
+            degrees = rng.integers(
+                self.min_degree, self.max_degree + 1,
+                size=self.population_size,
+            ).tolist()
+            if sum(degrees) % 2:
+                adjustable = [
+                    i for i, degree in enumerate(degrees)
+                    if degree < self.max_degree or degree > self.min_degree
+                ]
+                index = int(rng.choice(adjustable))
+                degrees[index] += 1 if degrees[index] < self.max_degree else -1
+            if is_graphical(degrees):
+                return degrees
+        raise RuntimeError("Could not generate a graphical random degree sequence.")
+
+    def contacts(self, individual_id: int, rng: Generator) -> np.ndarray:
+        """Return this person's persistent graph neighbours."""
+        return np.fromiter(self.graph.neighbors(individual_id), dtype=np.int64)

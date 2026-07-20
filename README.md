@@ -2,11 +2,11 @@
 
 A **multi-city SEIR epidemic simulator** with configurable contact networks and
 inter-city travel. Disease spreads within cities through contact networks
-(Watts-Strogatz small-world graphs) and between cities via temporary traveler
+(seeded random contact graphs by default) and between cities via temporary traveler
 movement.
 
 ### Intra-City Spread
-People in each city are modeled as a **contact network**:
+People in each city are modeled as a **seeded contact network**:
 - Each **node** is one individual.
 - Each **edge** is a recurring social contact.
 - Disease spreads **only along edges**, following SEIR dynamics
@@ -14,12 +14,15 @@ People in each city are modeled as a **contact network**:
 
 The network is a **Watts–Strogatz small-world graph**: dense local clustering
 (neighborhoods, schools, workplaces, families) plus a few long-range shortcuts.
-Alternatively, use a **well-mixed model** (any person can contact any other) for
-validation or comparison.
+The default graph gives every person a random number of persistent contacts
+from **1 through 7**. The random seed fixes both the degrees and edges, and the
+animation draws these links under the nodes. Watts-Strogatz and well-mixed
+models remain available for comparison.
 
 ### Inter-City Spread
-Multiple independent cities are connected by a **simple commuting travel layer**:
-1. Each city has a fixed pool of eligible commuters (`travel_fraction` of its residents).
+Multiple independent cities begin **completely disconnected** and are connected
+only by a **simple commuting travel layer**:
+1. Each city has a fixed pool of eligible commuters (`travel_fraction` of its residents), capped at half of that city's population.
 2. Each day, `daily_travel_rate` of that pool makes a day trip to a random other city.
 3. A traveler attaches to a random resident and mingles with that resident's
    contacts in the **destination city's own contact network** (not random mixing).
@@ -27,7 +30,9 @@ Multiple independent cities are connected by a **simple commuting travel layer**
    state travels with them:
    - an **infectious** visitor can expose susceptible residents (seeding the destination), and
    - a **susceptible** visitor can be infected by infectious residents and carries it home.
-5. Everyone returns home at day's end; imported infections are folded into that
+5. Each successful cross-city transmission creates a persistent directed string
+   in the animation from the infectious source node to the newly infected node.
+6. Everyone returns home at day's end; imported infections are folded into that
    same day's per-city statistics and animation frame.
 
 Because only **City A** is seeded, this cleanly measures how long it takes for
@@ -72,7 +77,9 @@ python main.py --regional --number-of-cities 2 --population-per-city 50 --travel
 | Parameter | Default | Meaning |
 |---|---|---|
 | `--daily-contacts` | 8 | Contacts per person per day (well-mixed model only). |
-| `--contact-model` | watts-strogatz | Model: `well-mixed` or `watts-strogatz`. |
+| `--contact-model` | random-network | Model: `random-network`, `well-mixed`, or `watts-strogatz`. |
+| `--random-degree-min` | 1 | Minimum persistent contacts per node in `random-network`. |
+| `--random-degree-max` | 7 | Maximum persistent contacts per node in `random-network`. |
 | `--watts-strogatz-k` | 8 | Neighborhood size (mean degree) in W-S networks. |
 | `--watts-strogatz-p` | 0.1 | Rewiring probability in W-S networks. |
 
@@ -81,7 +88,7 @@ python main.py --regional --number-of-cities 2 --population-per-city 50 --travel
 |---|---|---|
 | `--number-of-cities` | 2 | Number of independent cities. |
 | `--population-per-city` | 50 | Population in each city. |
-| `--travel-fraction` | 0.5 | Fraction of population eligible to travel. |
+| `--travel-fraction` | 0.5 | Fraction of population eligible to travel (maximum 0.5). |
 | `--daily-travel-rate` | 0.1 | Fraction of eligible who actually travel. |
 
 ### Reproducibility

@@ -1,7 +1,8 @@
 """Regional simulation: multiple cities connected by temporary daily travel.
 
 A :class:`RegionalSimulation` coordinates several independent :class:`~city.City`
-objects and layers a simple *commuting* travel model on top. Each simulated day:
+objects and layers a simple *commuting* travel model on top. Cities begin with
+no cross-city graph edges. Each simulated day:
 
 1. Disease progresses **inside** every city, through that city's own contact
    network (see :meth:`City.advance_disease`).
@@ -17,7 +18,9 @@ objects and layers a simple *commuting* travel model on top. Each simulated day:
    * a *susceptible* traveler can be exposed by infectious residents and brings
      that infection home.
 
-5. Everyone returns home; imported infections are folded into the destination /
+5. A successful cross-city transmission adds a persistent inter-city link from
+   the infectious source node to the newly infected target node.
+6. Everyone returns home; imported infections are folded into the destination /
    home city's statistics for that same day.
 
 This is deliberately the *simplest* thing that reproduces the phenomenon of
@@ -67,6 +70,17 @@ class TravelEvent:
     residents_infected: int
 
 
+@dataclass(frozen=True)
+class InterCityTransmission:
+    """A persistent edge created by one travel-caused transmission."""
+
+    day: int
+    source_city_id: int
+    source_individual_id: int
+    target_city_id: int
+    target_individual_id: int
+
+
 class RegionalSimulation:
     """Coordinate multiple cities connected by temporary daily travel.
 
@@ -76,6 +90,8 @@ class RegionalSimulation:
         rng: The master generator seeding every city and driving all travel.
         eligible: Per-city fixed list of ids allowed to travel (the commuters).
         travel_events: Every :class:`TravelEvent` recorded across the run.
+        intercity_transmissions: Persistent cross-city edges created when a
+            traveler infects a resident or a resident infects a traveler.
         history: One regional-statistics dict per day (including day 0).
     """
 
@@ -106,6 +122,8 @@ class RegionalSimulation:
                 contact_model_type=config.contact_model,
                 watts_strogatz_k=config.watts_strogatz_k,
                 watts_strogatz_p=config.watts_strogatz_p,
+                random_degree_min=config.random_degree_min,
+                random_degree_max=config.random_degree_max,
             )
             self.cities.append(City(city_id, city_config, city_rng))
 
@@ -123,6 +141,7 @@ class RegionalSimulation:
             self.eligible.append(np.sort(pool))
 
         self.travel_events: List[TravelEvent] = []
+        self.intercity_transmissions: List[InterCityTransmission] = []
         self.history: List[Dict] = []
         self._day = 0
 
@@ -249,7 +268,8 @@ class RegionalSimulation:
         """Run one traveler's day trip and apply any transmission.
 
         The traveler attaches to a random resident "host" in the destination
-        and interacts with that host's contacts in the destination's network.
+        and interacts with that host and the host's contacts in the
+        destination's network.
         Transmission is bidirectional and probabilistic per the shared
         ``infection_probability``; the traveler's own state travels with them.
 
@@ -267,9 +287,12 @@ class RegionalSimulation:
         state_before = home.get_individual_state(traveler_id)
 
         host_id = int(self.rng.integers(0, self.config.population_per_city))
-        contacts = dest.contacts_of(host_id, self.rng)
+        # Including the host means a visitor always has a real destination
+        # resident to meet, even when that resident has only one graph edge.
+        contacts = np.unique(np.append(dest.contacts_of(host_id, self.rng), host_id))
 
         acquired = False
+        source_id: int | None = None
         residents_infected = 0
 
         if state_before is State.INFECTIOUS:
@@ -280,6 +303,13 @@ class RegionalSimulation:
                         residents_infected += 1
                         dest.imported_infections += 1
                         imported_today[dest_id] += 1
+                        self.intercity_transmissions.append(InterCityTransmission(
+                            day=self._day,
+                            source_city_id=home_id,
+                            source_individual_id=traveler_id,
+                            target_city_id=dest_id,
+                            target_individual_id=int(cid),
+                        ))
         elif state_before is State.SUSCEPTIBLE:
             # Susceptible visitor may be exposed by infectious residents and
             # carries that infection home.
@@ -287,10 +317,19 @@ class RegionalSimulation:
                 if dest.get_individual_state(int(cid)) is State.INFECTIOUS:
                     if self.rng.random() < p:
                         acquired = True
+                        source_id = int(cid)
                         break
             if acquired and home.expose(traveler_id):
+                assert source_id is not None
                 home.imported_infections += 1
                 imported_today[home_id] += 1
+                self.intercity_transmissions.append(InterCityTransmission(
+                    day=self._day,
+                    source_city_id=dest_id,
+                    source_individual_id=source_id,
+                    target_city_id=home_id,
+                    target_individual_id=traveler_id,
+                ))
         # EXPOSED (incubating) or RECOVERED travelers carry their state home but
         # neither transmit nor are (re)infected during the visit.
 

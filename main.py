@@ -74,9 +74,15 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Maximum number of days to simulate.")
     model.add_argument("--random-seed", type=int, default=d.random_seed,
                        help="Seed for all randomness (reproducibility).")
-    model.add_argument("--contact-model", choices=("well-mixed", "watts-strogatz"),
+    model.add_argument("--contact-model", choices=("random-network", "well-mixed", "watts-strogatz"),
                        default=d.contact_model,
                        help="Contact network model.")
+    model.add_argument("--random-degree-min", type=int,
+                       default=d.random_degree_min,
+                       help="Minimum persistent contacts per node in a random network.")
+    model.add_argument("--random-degree-max", type=int,
+                       default=d.random_degree_max,
+                       help="Maximum persistent contacts per node in a random network.")
     model.add_argument("--watts-strogatz-k", type=int, default=d.watts_strogatz_k,
                        help="Neighbourhood size for Watts-Strogatz networks.")
     model.add_argument("--watts-strogatz-p", type=float, default=d.watts_strogatz_p,
@@ -89,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
                           default=d.population_per_city,
                           help="Number of individuals per city.")
     regional.add_argument("--travel-fraction", type=float, default=d.travel_fraction,
-                          help="Fraction of population eligible to travel (0-1).")
+                          help="Fraction of population eligible to travel (0-0.5).")
     regional.add_argument("--daily-travel-rate", type=float,
                           default=d.daily_travel_rate,
                           help="Fraction of eligible travelers who actually travel.")
@@ -131,6 +137,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         simulation_days=args.simulation_days,
         random_seed=args.random_seed,
         contact_model=args.contact_model,
+        random_degree_min=args.random_degree_min,
+        random_degree_max=args.random_degree_max,
         watts_strogatz_k=args.watts_strogatz_k,
         watts_strogatz_p=args.watts_strogatz_p,
         number_of_cities=args.number_of_cities,
@@ -254,7 +262,8 @@ def run_single_city(config: Config, args: argparse.Namespace) -> None:
         visualization.animate_states(
             simulation.state_frames, simulation.history, config,
             layout=args.layout, save_path=args.save_gif,
-            show=args.show, interval_ms=args.interval_ms)
+            show=args.show, interval_ms=args.interval_ms,
+            graph=getattr(simulation.engine.contact_model, "graph", None))
 
 
 def run_regional(config: Config, args: argparse.Namespace) -> None:

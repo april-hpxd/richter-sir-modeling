@@ -23,7 +23,12 @@ from numpy.random import Generator
 from config import Config
 from disease_model import State
 from engine import DiseaseEngine
-from interaction import ContactModel, WattsStrogatzContactModel, WellMixedContactModel
+from interaction import (
+    ContactModel,
+    RandomNetworkContactModel,
+    WattsStrogatzContactModel,
+    WellMixedContactModel,
+)
 from simulation import DailyRecord
 
 
@@ -43,6 +48,8 @@ class CityConfig:
     contact_model_type: str
     watts_strogatz_k: int
     watts_strogatz_p: float
+    random_degree_min: int
+    random_degree_max: int
 
 
 class City:
@@ -99,6 +106,13 @@ class City:
             A ContactModel instance (WellMixedContactModel or
             WattsStrogatzContactModel).
         """
+        if self.config.contact_model_type == "random-network":
+            return RandomNetworkContactModel(
+                population_size=self.config.population_size,
+                min_degree=self.config.random_degree_min,
+                max_degree=self.config.random_degree_max,
+                rng=self.rng,
+            )
         if self.config.contact_model_type == "well-mixed":
             return WellMixedContactModel(
                 population_size=self.config.population_size,

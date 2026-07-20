@@ -21,7 +21,11 @@ import numpy as np
 from config import Config
 from disease_model import State
 from engine import DiseaseEngine
-from interaction import WattsStrogatzContactModel, WellMixedContactModel
+from interaction import (
+    RandomNetworkContactModel,
+    WattsStrogatzContactModel,
+    WellMixedContactModel,
+)
 
 
 @dataclass
@@ -98,6 +102,13 @@ class Simulation:
         Returns:
             A ContactModel instance.
         """
+        if config.contact_model == "random-network":
+            return RandomNetworkContactModel(
+                population_size=config.population_size,
+                min_degree=config.random_degree_min,
+                max_degree=config.random_degree_max,
+                rng=self.rng,
+            )
         if config.contact_model == "well-mixed":
             return WellMixedContactModel(
                 population_size=config.population_size,

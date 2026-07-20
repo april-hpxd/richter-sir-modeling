@@ -1,4 +1,4 @@
-"""Visualization: a fixed-position scatter animation and SEIR curves.
+"""Visualization: contact-network animations and SEIR curves.
 
 This module is purely presentational. It consumes recorded simulation output
 (per-day state snapshots and :class:`~simulation.DailyRecord` counts) and knows
@@ -7,10 +7,8 @@ keyed by :class:`~disease_model.State`.
 
 Products:
 
-* :func:`animate_states` -- an animated GIF in which each of the (small)
-  population is drawn as one marker at a **fixed** position (grid or circle).
-  Only the marker colours change from day to day, so the eye tracks individuals
-  turning exposed, infectious, then recovered.
+* :func:`animate_states` -- an animated GIF in which each population is drawn
+  at fixed positions with its persistent contact-network edges underneath.
 * :func:`plot_curves` -- the standard SEIR epidemic curves over time.
 * :func:`animate_regional_states` -- side-by-side animations of multiple cities.
 * :func:`plot_regional_curves` -- regional epidemic curves (aggregated).
@@ -27,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.collections import LineCollection
 from matplotlib.patches import FancyArrowPatch, Patch
 
 from config import Config
@@ -107,11 +106,22 @@ def _legend_handles() -> List[Patch]:
     return [Patch(color=STATE_COLOR[s], label=STATE_LABEL[s]) for s in State]
 
 
+def _draw_network_edges(ax, graph, coords: np.ndarray) -> None:
+    """Draw the static, within-city contact graph beneath the node markers."""
+    if graph is None or graph.number_of_edges() == 0:
+        return
+    segments = [(coords[left], coords[right]) for left, right in graph.edges()]
+    ax.add_collection(LineCollection(
+        segments, colors="#9aa0a6", linewidths=0.65, alpha=0.55, zorder=1
+    ))
+
+
 def animate_states(state_frames: List[List[State]], history: List[DailyRecord],
                    config: Config, layout: str = "grid",
                    save_path: Optional[str] = None,
                    show: bool = False,
-                   interval_ms: int = 400) -> FuncAnimation:
+                   interval_ms: int = 400,
+                   graph=None) -> FuncAnimation:
     """Animate per-individual state changes on a fixed layout.
 
     Args:
@@ -124,6 +134,7 @@ def animate_states(state_frames: List[List[State]], history: List[DailyRecord],
         save_path: If given, save the animation to this ``.gif`` path.
         show: If ``True``, display the animation window.
         interval_ms: Delay between frames in milliseconds.
+        graph: Optional persistent contact graph to render behind the nodes.
 
     Returns:
         The :class:`~matplotlib.animation.FuncAnimation`. Keep a reference to it
@@ -135,8 +146,10 @@ def animate_states(state_frames: List[List[State]], history: List[DailyRecord],
     coords = np.array(positions)
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    fig.suptitle("SEIR epidemic in a well-mixed city of "
+    fig.suptitle("SEIR epidemic contact network of "
                  f"{n} people", fontsize=13, weight="bold")
+
+    _draw_network_edges(ax, graph, coords)
 
     marker_size = max(80, min(600, 12000 / n))
     scatter = ax.scatter(
@@ -278,11 +291,14 @@ def animate_regional_states(regional_sim: RegionalSimulation,
     marker_size = max(80, min(600, 12000 / pop_per_city))
     scatters = []
     day_texts = []
+    coords_per_city: List[np.ndarray] = []
 
     for city_idx, (ax, city, positions) in enumerate(
         zip(axes, cities, positions_per_city)
     ):
         coords = np.array(positions)
+        coords_per_city.append(coords)
+        _draw_network_edges(ax, city.network, coords)
         scatter = ax.scatter(
             coords[:, 0], coords[:, 1], s=marker_size,
             c=[STATE_COLOR[s] for s in cities[city_idx].state_frames[0]],
@@ -309,6 +325,7 @@ def animate_regional_states(regional_sim: RegionalSimulation,
 
     # Transient travel artists (arrows + labels), recreated each frame.
     travel_artists: List = []
+    cross_city_artists: List = []
 
     def _draw_travel(frame: int) -> None:
         """Draw dashed arrows between adjacent panels for day ``frame``."""
@@ -337,6 +354,28 @@ def animate_regional_states(regional_sim: RegionalSimulation,
                              color="#4062bb", weight="bold")
             travel_artists.extend([arrow, label])
 
+    def _draw_cross_city_links(frame: int) -> None:
+        """Draw persistent strings for travel-caused transmissions so far."""
+        while cross_city_artists:
+            cross_city_artists.pop().remove()
+        for link in regional_sim.intercity_transmissions:
+            if link.day > frame:
+                continue
+            source_axes = axes[link.source_city_id]
+            target_axes = axes[link.target_city_id]
+            source_xy = coords_per_city[link.source_city_id][link.source_individual_id]
+            target_xy = coords_per_city[link.target_city_id][link.target_individual_id]
+            source_fig = fig.transFigure.inverted().transform(
+                source_axes.transData.transform(source_xy))
+            target_fig = fig.transFigure.inverted().transform(target_axes.transData.transform(target_xy))
+            string = FancyArrowPatch(
+                source_fig, target_fig, transform=fig.transFigure,
+                arrowstyle="->", mutation_scale=10, linewidth=1.4,
+                color="#6c63ff", alpha=0.82, zorder=6,
+            )
+            fig.add_artist(string)
+            cross_city_artists.append(string)
+
     def update(frame: int):
         """Recolour every marker to its state on day ``frame``."""
         for city_idx, city in enumerate(cities):
@@ -353,7 +392,8 @@ def animate_regional_states(regional_sim: RegionalSimulation,
                         f"I={rec.infectious} R={rec.recovered}"
                     )
         _draw_travel(frame)
-        return scatters + day_texts + travel_artists
+        _draw_cross_city_links(frame)
+        return scatters + day_texts + travel_artists + cross_city_artists
 
     max_frames = max(len(city.state_frames) for city in cities)
     anim = FuncAnimation(
