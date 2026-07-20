@@ -21,7 +21,7 @@ import numpy as np
 from config import Config
 from disease_model import State
 from engine import DiseaseEngine
-from interaction import WellMixedContactModel
+from interaction import WattsStrogatzContactModel, WellMixedContactModel
 
 
 @dataclass
@@ -72,10 +72,7 @@ class Simulation:
         self.config = config
         self.rng = np.random.default_rng(config.random_seed)
 
-        contact_model = WellMixedContactModel(
-            population_size=config.population_size,
-            daily_contacts=config.daily_contacts,
-        )
+        contact_model = self._build_contact_model(config)
         self.engine = DiseaseEngine(
             population_size=config.population_size,
             contact_model=contact_model,
@@ -91,6 +88,30 @@ class Simulation:
         self.state_frames: List[List[State]] = []
         self._record(new_exposed=config.initial_infected,
                      new_infectious=0, new_recovered=0)
+
+    def _build_contact_model(self, config: Config):
+        """Construct the appropriate contact model.
+
+        Args:
+            config: The simulation configuration.
+
+        Returns:
+            A ContactModel instance.
+        """
+        if config.contact_model == "well-mixed":
+            return WellMixedContactModel(
+                population_size=config.population_size,
+                daily_contacts=config.daily_contacts,
+            )
+        elif config.contact_model == "watts-strogatz":
+            return WattsStrogatzContactModel(
+                population_size=config.population_size,
+                k=config.watts_strogatz_k,
+                p=config.watts_strogatz_p,
+                rng=self.rng,
+            )
+        else:
+            raise ValueError(f"Unknown contact model: {config.contact_model}")
 
     # ------------------------------------------------------------------
     # Driving the simulation

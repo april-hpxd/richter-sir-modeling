@@ -5,12 +5,12 @@ disease engine never decides *how* people come into contact; it only asks a
 :class:`ContactModel` "who does person ``i`` interact with today?" and applies
 transmission along whatever ids come back.
 
-This milestone ships one implementation, :class:`WellMixedContactModel`, in
-which any individual may meet any other (a temporary, homogeneous-mixing
-assumption). The explicit goal is that the *next* milestone can add a
-``WattsStrogatzContactModel`` -- returning a node's graph neighbours instead of
-random strangers -- by writing a new subclass here and changing nothing in
-:mod:`engine`, :mod:`disease_model`, or the disease progression itself.
+Two implementations ship here:
+
+* :class:`WellMixedContactModel` -- any individual may meet any other
+  (homogeneous-mixing assumption; used for validation).
+* :class:`WattsStrogatzContactModel` -- each person's contacts are their
+  neighbours in a small-world network graph.
 
 All randomness flows through a single NumPy :class:`~numpy.random.Generator`
 passed in by the caller, so contact draws stay part of the one reproducible
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+import networkx as nx
 import numpy as np
 from numpy.random import Generator
 
@@ -100,3 +101,55 @@ class WellMixedContactModel(ContactModel):
         )
         # Map positions >= individual_id up by one to skip the individual.
         return np.where(positions >= individual_id, positions + 1, positions)
+
+
+class WattsStrogatzContactModel(ContactModel):
+    """Small-world network: contacts are graph neighbours.
+
+    Each person's daily contacts are their neighbours in a Watts-Strogatz
+    small-world network. The network is built once at construction (deterministic
+    via an RNG seed) and remains fixed across all simulation days. On each day,
+    an infectious individual has daily contact with their graph neighbours
+    (possibly augmented by random rewiring to introduce long-range edges).
+
+    Attributes:
+        graph: The underlying networkx small-world graph (node ids = individual ids).
+    """
+
+    def __init__(self, population_size: int, k: int = 4, p: float = 0.1,
+                 rng: Generator | None = None) -> None:
+        """Build a Watts-Strogatz small-world network.
+
+        Args:
+            population_size: Number of nodes (individuals).
+            k: Each node connected to k nearest neighbours (on each side).
+            p: Rewiring probability for small-world edges (0 = lattice, 1 = random).
+            rng: Optional NumPy generator for reproducible graph construction.
+                If not given, a new default generator is used.
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+
+        seed = int(rng.integers(0, 2**31))
+        self.graph = nx.watts_strogatz_graph(
+            n=population_size,
+            k=k,
+            p=p,
+            seed=seed,
+        )
+
+    def contacts(self, individual_id: int, rng: Generator) -> np.ndarray:
+        """Return the graph neighbours of this individual.
+
+        The RNG parameter is unused here (the network is static), but accepted
+        to maintain the :class:`ContactModel` interface.
+
+        Args:
+            individual_id: The individual whose contacts we need.
+            rng: The shared random generator (unused; network is deterministic).
+
+        Returns:
+            A 1-D array of this node's neighbours in the graph.
+        """
+        neighbors = list(self.graph.neighbors(individual_id))
+        return np.array(neighbors, dtype=np.int64)

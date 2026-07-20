@@ -1,9 +1,8 @@
-# Dependencies for the SEIR well-mixed milestone.
+# Dependencies for the regional multi-city SEIR simulation.
 numpy>=1.24
 matplotlib>=3.7
+networkx>=3.0
 
+# networkx builds each city's Watts-Strogatz contact network.
 # Saving the animation as a GIF works out of the box via matplotlib's Pillow
 # writer (Pillow ships with matplotlib).
-
-# Not needed yet: networkx / scipy return in the next milestone, when the
-# well-mixed interaction layer is replaced by a Watts-Strogatz contact network.

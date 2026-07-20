@@ -1,86 +1,156 @@
-# Computational Modeling of Regional Disease Spread — Milestone 1
+# Computational Modeling of Regional Disease Spread
 
-A **single-city network SIR epidemic simulator**. This is the first milestone
-of a larger Rcihter Project that will eventually simulate
-influenza spreading between Midwestern cities connected by rail travel. In this
-milestone I want to build the reusable disease engine for one city; later milestones
-will instantiate it many times and add an inter-city mobility layer.
+A **multi-city SEIR epidemic simulator** with configurable contact networks and
+inter-city travel. Disease spreads within cities through contact networks
+(Watts-Strogatz small-world graphs) and between cities via temporary traveler
+movement.
 
-## What it should do
-
-Rather than the classical homogeneous-mixing SIR model (where everyone can
-infect everyone), people are modeled as a **contact network**:
-
+### Intra-City Spread
+People in each city are modeled as a **contact network**:
 - Each **node** is one individual.
 - Each **edge** is a recurring social contact.
-- Disease spreads **only along edges**, following SIR dynamics
-  (**S**usceptible → **I**nfected → **R**ecovered), where recovery grants
-  permanent immunity.
+- Disease spreads **only along edges**, following SEIR dynamics
+  (**S**usceptible → **E**xposed → **I**nfectious → **R**ecovered).
 
 The network is a **Watts–Strogatz small-world graph**: dense local clustering
-(neighborhoods, schools, workplaces, families) plus a few long-range shortcuts
-(occasional outside contact). This should be much more realistic than random mixing.
+(neighborhoods, schools, workplaces, families) plus a few long-range shortcuts.
+Alternatively, use a **well-mixed model** (any person can contact any other) for
+validation or comparison.
 
-## Requirements (As of now)
+### Inter-City Spread
+Multiple independent cities are connected by a **simple commuting travel layer**:
+1. Each city has a fixed pool of eligible commuters (`travel_fraction` of its residents).
+2. Each day, `daily_travel_rate` of that pool makes a day trip to a random other city.
+3. A traveler attaches to a random resident and mingles with that resident's
+   contacts in the **destination city's own contact network** (not random mixing).
+4. Transmission during the visit is **bidirectional** and the traveler's disease
+   state travels with them:
+   - an **infectious** visitor can expose susceptible residents (seeding the destination), and
+   - a **susceptible** visitor can be infected by infectious residents and carries it home.
+5. Everyone returns home at day's end; imported infections are folded into that
+   same day's per-city statistics and animation frame.
 
-```
+Because only **City A** is seeded, this cleanly measures how long it takes for
+infection to first reach **City B** (and how much its epidemic curve is delayed
+relative to City A's). With the defaults, infection typically reaches City B
+around day 8–13 and City B's peak trails City A's by roughly two weeks.
+
+## Requirements
+
+```bash
 pip install -r requirements.txt
 ```
 
-Python 3.9+ with `networkx`, `numpy`, `scipy`, and `matplotlib`. Saving
-animations as **MP4** additionally needs an `ffmpeg` binary on your `PATH`;
-**GIF** export works out of the box.
+Python 3.9+ with `numpy`, `networkx`, and `matplotlib`. All dependencies are
+in `requirements.txt`. GIF animations are built-in; MP4 export requires
+`ffmpeg` on your `PATH`.
 
+## Quick Start
 
-## Planned Parameters
+### Single-City SEIR 
+```bash
+python main.py --single-city --population-size 50 --save-gif single_city.gif
+```
 
-All parameters need to live in [`config.py`] and are exposed on the command line:
+### Regional Multi-City 
+```bash
+python main.py --regional --number-of-cities 2 --population-per-city 50 --travel-fraction 0.5 --daily-travel-rate 0.1 --save-gif regional.gif --save-curves curves.png
+```
 
-| Parameter | CLI flag | Meaning |
+## Parameters
+
+### Disease Model
+| Parameter | Default | Meaning |
 |---|---|---|
-| `population_size` | `--population-size` | Number of individuals (nodes). |
-| `average_contacts` | `--average-contacts` | Mean contacts per person (even). |
-| `rewiring_probability` | `--rewiring-probability` | Small-world rewiring (β). |
-| `infection_probability` | `--infection-probability` | Per-contact, per-day transmission. |
-| `recovery_probability` | `--recovery-probability` | Per-day recovery (1/mean infectious period). |
-| `initial_infected` | `--initial-infected` | Number of patient zeros. |
-| `simulation_days` | `--simulation-days` | Maximum days to simulate. |
-| `random_seed` | `--random-seed` | Seed for full reproducibility. |
-| `animation_speed` | `--animation-speed` | Milliseconds per frame. |
+| `--infection-probability` | 0.06 | Per-contact transmission probability. |
+| `--incubation-days` | 2 | Days in EXPOSED state. |
+| `--infectious-days` | 6 | Days in INFECTIOUS state. |
+| `--initial-infected` | 2 | Number of initial cases in City A (EXPOSED). |
+| `--simulation-days` | 120 | Maximum days to simulate. |
 
-A useful rule to use for statistics:
-`R0 ~= infection_probability * average_contacts / recovery_probability`
+### Contact Network
+| Parameter | Default | Meaning |
+|---|---|---|
+| `--daily-contacts` | 8 | Contacts per person per day (well-mixed model only). |
+| `--contact-model` | watts-strogatz | Model: `well-mixed` or `watts-strogatz`. |
+| `--watts-strogatz-k` | 8 | Neighborhood size (mean degree) in W-S networks. |
+| `--watts-strogatz-p` | 0.1 | Rewiring probability in W-S networks. |
 
-## Planned Architecture
+### Regional Simulation (Milestone 2)
+| Parameter | Default | Meaning |
+|---|---|---|
+| `--number-of-cities` | 2 | Number of independent cities. |
+| `--population-per-city` | 50 | Population in each city. |
+| `--travel-fraction` | 0.5 | Fraction of population eligible to travel. |
+| `--daily-travel-rate` | 0.1 | Fraction of eligible who actually travel. |
 
-Each file should have one job:
+### Reproducibility
+| Parameter | Default | Meaning |
+|---|---|---|
+| `--random-seed` | 42 | Seed for all randomness. |
+
+### Output
+| Parameter | Meaning |
+|---|---|
+| `--save-gif PATH` | Save state animation to GIF. |
+| `--save-curves PATH` | Save SEIR curves to PNG. |
+| `--layout` | Grid (`grid`) or circle (`circle`) layout. |
+| `--interval-ms` | Milliseconds per animation frame. |
+| `--quiet` | Suppress per-day progress output. |
+
+## Architecture
+
+Each module has one responsibility:
 
 ```
-config.py             # Config: all tunable parameters (immutable)
-network_generator.py  # Build the Watts–Strogatz network + fixed layout
-sir_engine.py         # SIREngine: the core day-by-day SIR dynamics (reusable)
-simulation.py         # Simulation: orchestrates a run + records history
-statistics.py         # Summaries, R estimate, live panel text, CSV export
-visualization.py      # Network + geographic animations, summary plots
-main.py               # Command-line entry point wiring it all together
+config.py                # Immutable configuration (all parameters)
+disease_model.py         # SEIR state and Individual (no dynamics)
+interaction.py           # ContactModel interface + implementations
+engine.py                # DiseaseEngine: SEIR progression + transmission
+simulation.py            # Simulation: orchestrates single-city run
+city.py                  # City: independent city with own engine + network
+regional_simulation.py   # RegionalSimulation: coordinates cities + travel
+statistics.py            # Summary statistics from history
+visualization.py         # Single-city and regional animations + curves
+main.py                  # CLI entry point
 ```
 
-The **`SIREngine`** and **`Simulation`** classes are to be self-contained: 
-each owns its own network, RNG stream and state, with no
-global dependencies and no coupling to visualization.
+### Key Classes
 
-## Path to the multi-city model
+**DiseaseEngine**: Core SEIR dynamics
+- Owns population of Individuals
+- Advances disease state each day
+- Uses a ContactModel to determine interactions
+- Completely independent of visualization or travel logic
 
-This milestone is designed to become one reusable city object:
+**City**: One city in a regional simulation
+- Owns its own DiseaseEngine and contact network
+- Owns its own independent RNG
+- Owns its history (daily records and state frames)
+- Can run completely standalone or as part of RegionalSimulation
 
-```
-Simulation (this milestone)
-    --  
-City class  (owns its own Config, network, engine, history)
-    --  
-Multiple City objects
-    --
-Rail mobility layer  (moves infected individuals between cities)
-    --
-Regional epidemic simulation
-```
+**RegionalSimulation**: Coordinates multiple cities
+- Owns a list of City objects and the fixed per-city commuter pools
+- Each day: advance disease in all cities, execute travel, record statistics
+- Travel model: select today's commuters, assign destinations, run
+  bidirectional transmission through the destination's network, fold any
+  imported infections into the affected city's day, return travelers home
+- All travel randomness is drawn from the master RNG (cities keep their own
+  RNGs for internal dynamics), so a single seed reproduces the whole region
+
+## Design Principles
+
+1. **Modularity**: Disease engine knows nothing about travel, visualization, or
+   networking infrastructure. Swapping the contact model or travel layer requires
+   no changes to core epidemic logic.
+
+2. **Reproducibility**: Single master RNG seed (via `--random-seed`) drives all
+   randomness. Identical seeds produce identical results.
+
+3. **Independence**: Each City owns its own RNG (spawned from the master seed),
+   network, and population. Cities can run in isolation or coordinated regionally.
+
+4. **Immutability**: Config is frozen at construction; history is append-only.
+   Visualization and statistics read from history without modifying it.
+
+5. **Type Safety**: Extensive type hints and dataclasses prevent silent errors.

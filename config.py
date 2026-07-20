@@ -4,15 +4,6 @@ All tunable parameters live in one immutable :class:`Config` object so that a
 run is fully described by a single value and identical configurations (same
 ``random_seed`` included) reproduce identical simulations.
 
-Scope of this milestone
-------------------------
-This milestone validates the **disease progression engine** on a small,
-*well-mixed* virtual city (~50 people): every day anyone may interact with
-anyone. The contact network (Watts-Strogatz) is intentionally **not** built
-yet. Because who-meets-whom is isolated behind the interaction layer
-(:mod:`interaction`), introducing the network later changes only that layer --
-these parameters and the disease dynamics stay as they are.
-
 Design note for future work
 ----------------------------
 In the eventual regional model each ``City`` will own its own :class:`Config`
@@ -31,9 +22,9 @@ class Config:
     """Immutable bundle of simulation parameters.
 
     Attributes:
-        population_size: Number of individuals in the city.
+        population_size: Number of individuals per city (for single-city runs).
         daily_contacts: How many other people each *infectious* individual
-            interacts with per day in the well-mixed model.
+            interacts with per day in the contact model.
         infection_probability: Probability that a single S<-I interaction
             results in transmission (the new case enters ``EXPOSED``).
         incubation_days: Days spent ``EXPOSED`` (infected but not yet
@@ -45,28 +36,51 @@ class Config:
             randomness, guaranteeing reproducibility.
         initial_infected: Number of initial cases (seeded as ``EXPOSED`` on
             day 0, matching the ``S -> E`` start of a patient-zero timeline).
+        contact_model: Which contact model to use: "well-mixed" or "watts-strogatz".
+        watts_strogatz_k: For Watts-Strogatz networks, the neighbourhood size.
+        watts_strogatz_p: For Watts-Strogatz networks, the rewiring probability.
 
-    A rough basic reproduction number for a well-mixed population is::
+    Regional parameters (used by :class:`RegionalSimulation`):
+        number_of_cities: How many independent cities in the regional simulation.
+        population_per_city: Number of individuals per city (overrides
+            ``population_size`` when running regionally).
+        travel_fraction: Fraction of the population eligible to travel (0.0 to 1.0).
+        daily_travel_rate: Fraction of eligible travelers who actually travel
+            on a given day (0.0 to 1.0).
 
-        R0 ~= infection_probability * daily_contacts * infectious_days
+    A rough basic reproduction number is::
 
-    With the defaults this is about 2.4, enough to produce a clear outbreak in
-    a fully susceptible population of 50 without instantly infecting everyone.
+        R0 ~= infection_probability * mean_contacts * infectious_days
+
+    where ``mean_contacts`` is the network mean degree ``k`` for the
+    Watts-Strogatz model (or ``daily_contacts`` when well-mixed). With the
+    defaults this is about 2.9 -- enough to produce a clear outbreak in the
+    seeded city and to reliably carry infection to the other city via travel,
+    while still leaving some individuals uninfected.
     """
 
     # --- Population / interaction ----------------------------------------
     population_size: int = 50
     daily_contacts: int = 8
+    contact_model: str = "watts-strogatz"
+    watts_strogatz_k: int = 8
+    watts_strogatz_p: float = 0.1
 
     # --- Disease dynamics -------------------------------------------------
-    infection_probability: float = 0.05
+    infection_probability: float = 0.06
     incubation_days: int = 2
     infectious_days: int = 6
-    initial_infected: int = 1
+    initial_infected: int = 2
 
     # --- Run control ------------------------------------------------------
     simulation_days: int = 120
     random_seed: int = 42
+
+    # --- Regional simulation parameters ----------------------------------
+    number_of_cities: int = 2
+    population_per_city: int = 50
+    travel_fraction: float = 0.5
+    daily_travel_rate: float = 0.1
 
     def __post_init__(self) -> None:
         """Validate parameters, raising ``ValueError`` on nonsensical input.
@@ -80,6 +94,12 @@ class Config:
             raise ValueError(
                 "daily_contacts must be between 1 and population_size - 1."
             )
+        if self.contact_model not in ("well-mixed", "watts-strogatz"):
+            raise ValueError("contact_model must be 'well-mixed' or 'watts-strogatz'.")
+        if self.watts_strogatz_k < 1:
+            raise ValueError("watts_strogatz_k must be >= 1.")
+        if not 0.0 <= self.watts_strogatz_p <= 1.0:
+            raise ValueError("watts_strogatz_p must be in [0, 1].")
         if not 0.0 <= self.infection_probability <= 1.0:
             raise ValueError("infection_probability must be in [0, 1].")
         if self.incubation_days < 1:
@@ -92,6 +112,14 @@ class Config:
             )
         if self.simulation_days < 1:
             raise ValueError("simulation_days must be >= 1.")
+        if self.number_of_cities < 1:
+            raise ValueError("number_of_cities must be >= 1.")
+        if self.population_per_city < 2:
+            raise ValueError("population_per_city must be >= 2.")
+        if not 0.0 <= self.travel_fraction <= 1.0:
+            raise ValueError("travel_fraction must be in [0, 1].")
+        if not 0.0 <= self.daily_travel_rate <= 1.0:
+            raise ValueError("daily_travel_rate must be in [0, 1].")
 
     def with_overrides(self, **overrides: Any) -> "Config":
         """Return a new :class:`Config` with the given fields replaced.
@@ -117,9 +145,15 @@ class Config:
         """Return a back-of-the-envelope basic reproduction number.
 
         Not used to drive the simulation; provided only to help interpret
-        parameters::
+        parameters. The effective daily contact count depends on the active
+        contact model: for Watts-Strogatz it is the mean network degree
+        (``k``), whereas the well-mixed model uses ``daily_contacts``::
 
-            R0 ~= infection_probability * daily_contacts * infectious_days
+            R0 ~= infection_probability * mean_contacts * infectious_days
         """
-        return (self.infection_probability * self.daily_contacts
+        if self.contact_model == "watts-strogatz":
+            mean_contacts = self.watts_strogatz_k
+        else:
+            mean_contacts = self.daily_contacts
+        return (self.infection_probability * mean_contacts
                 * self.infectious_days)
