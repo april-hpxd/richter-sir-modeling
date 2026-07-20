@@ -23,12 +23,6 @@ no cross-city graph edges. Each simulated day:
 6. Everyone returns home; imported infections are folded into the destination /
    home city's statistics for that same day.
 
-This is deliberately the *simplest* thing that reproduces the phenomenon of
-interest -- how travel delays or accelerates the arrival of an outbreak in
-another city -- with no routes, schedules, or transport modes. All travel
-randomness is drawn from the single master generator, so the whole regional run
-is reproducible from one seed. Replacing this layer with a richer transport
-model requires no change to the disease engine or to :class:`City`.
 """
 
 from __future__ import annotations

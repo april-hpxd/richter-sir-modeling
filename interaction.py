@@ -1,12 +1,5 @@
 """The interaction layer: who meets whom each day.
 
-This is the single seam that the whole architecture is designed around. The
-disease engine never decides *how* people come into contact; it only asks a
-:class:`ContactModel` "who does person ``i`` interact with today?" and applies
-transmission along whatever ids come back.
-
-Three implementations ship here:
-
 * :class:`WellMixedContactModel` -- any individual may meet any other
   (homogeneous-mixing assumption; used for validation).
 * :class:`WattsStrogatzContactModel` -- each person's contacts are their

@@ -1,12 +1,5 @@
 """Visualization: contact-network animations and SEIR curves.
 
-This module is purely presentational. It consumes recorded simulation output
-(per-day state snapshots and :class:`~simulation.DailyRecord` counts) and knows
-nothing about disease dynamics -- its only tie to the model is a colour lookup
-keyed by :class:`~disease_model.State`.
-
-Products:
-
 * :func:`animate_states` -- an animated GIF in which each population is drawn
   at fixed positions with its persistent contact-network edges underneath.
 * :func:`plot_curves` -- the standard SEIR epidemic curves over time.

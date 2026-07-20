@@ -6,9 +6,6 @@ for every day. It owns the single NumPy :class:`~numpy.random.Generator` that
 drives *all* randomness in the run (seeding, contacts, transmission), which is
 what makes a given :class:`~config.Config` perfectly reproducible.
 
-Like the engine, this class is deliberately self-contained -- it holds its own
-population, RNG, and history and reaches out to no global state -- so it can
-later be renamed/wrapped as a ``City`` and instantiated many times.
 """
 
 from __future__ import annotations

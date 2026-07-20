@@ -4,11 +4,6 @@ All tunable parameters live in one immutable :class:`Config` object so that a
 run is fully described by a single value and identical configurations (same
 ``random_seed`` included) reproduce identical simulations.
 
-Design note for future work
-----------------------------
-In the eventual regional model each ``City`` will own its own :class:`Config`
-instance, and a mobility layer will sit on top. Nothing here assumes a single
-global city, so :class:`Config` can be instantiated many times unchanged.
 """
 
 from __future__ import annotations

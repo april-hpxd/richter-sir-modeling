@@ -17,8 +17,7 @@ Regional simulation (2 cities)::
 
 Two cities with travel::
 
-    python main.py --regional --number-of-cities 2 --travel-fraction 0.5 \\
-        --daily-travel-rate 0.1 --save-gif travel.gif
+    python main.py --regional --number-of-cities 2 --travel-fraction 0.5 --daily-travel-rate 0.1 --save-gif travel.gif
 """
 
 from __future__ import annotations

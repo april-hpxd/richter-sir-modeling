@@ -1,11 +1,5 @@
 """Core disease-domain data types: the SEIR states and the individual.
 
-This module holds *only* the vocabulary of the disease model -- the compartment
-:class:`State` and the per-person :class:`Individual` record. It contains no
-dynamics (that lives in :mod:`engine`), no randomness, and no plotting, so it
-can be imported freely by the engine, statistics, and visualization without
-creating circular dependencies or coupling those layers together.
-
 SEIR compartments
 -----------------
 * ``S`` Susceptible  -- can catch the disease.
@@ -13,9 +7,6 @@ SEIR compartments
 * ``I`` Infectious   -- can transmit to susceptible contacts.
 * ``R`` Recovered    -- permanently immune; cannot infect or be infected.
 
-Adding the ``E`` (Exposed) compartment is the key change from a plain SIR
-model: a newly infected person spends an incubation period unable to infect
-others before becoming infectious.
 """
 
 from __future__ import annotations

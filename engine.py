@@ -1,31 +1,9 @@
 """The SEIR disease engine: progression and transmission, one day at a time.
 
-This is the piece this milestone exists to validate. It owns the population's
-disease state and advances it by one day, combining two independent mechanisms:
-
 1. **Transmission** -- infectious individuals meet contacts (supplied by a
    :class:`~interaction.ContactModel`) and may expose susceptible ones.
 2. **Progression** -- each infected individual moves ``E -> I -> R`` purely as
    a function of how many days it has spent in its current state.
-
-The engine deliberately knows nothing about *how* contacts are chosen (that is
-the interaction layer's job) and nothing about plotting. Consequently, swapping
-the well-mixed model for a contact network later requires **no change here**:
-progression is untouched, and transmission simply iterates over whatever
-contacts the model returns.
-
-Daily update semantics
------------------------
-One :meth:`DiseaseEngine.step` is a synchronous update computed from the
-*start-of-day* state and committed at the end of the day:
-
-* Transmission uses the individuals infectious at the start of the day; each
-  new case is marked ``EXPOSED`` immediately (with ``days_in_state = 0``).
-* Progression ages every individual that was ``EXPOSED``/``INFECTIOUS`` at the
-  start of the day and applies ``E -> I`` after ``incubation_days`` and
-  ``I -> R`` after ``infectious_days``.
-* Individuals exposed *today* are not aged today, so they serve their full
-  incubation before becoming infectious.
 
 Worked example (incubation 2, infectious 6), for a person exposed on day 0::
 
