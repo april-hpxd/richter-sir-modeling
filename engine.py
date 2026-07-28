@@ -1,10 +1,5 @@
 """The SEIR disease engine: progression and transmission, one day at a time.
 
-1. **Transmission** -- infectious individuals meet contacts (supplied by a
-   :class:`~interaction.ContactModel`) and may expose susceptible ones.
-2. **Progression** -- each infected individual moves ``E -> I -> R`` purely as
-   a function of how many days it has spent in its current state.
-
 Worked example (incubation 2, infectious 6), for a person exposed on day 0::
 
     day 0:  S -> E      (seeded / newly exposed)
@@ -64,9 +59,9 @@ class DiseaseEngine:
         self._rng = rng
         self.day: int = 0
 
-    # ------------------------------------------------------------------
+    # 
     # Seeding
-    # ------------------------------------------------------------------
+    # 
     def seed_exposed(self, count: int) -> List[int]:
         """Seed ``count`` initial cases in the ``EXPOSED`` state.
 
@@ -96,9 +91,9 @@ class DiseaseEngine:
             self.individuals[int(cid)].days_in_state = 0
         return [int(c) for c in chosen]
 
-    # ------------------------------------------------------------------
+    # 
     # Daily update
-    # ------------------------------------------------------------------
+    # 
     def step(self) -> Dict[str, int]:
         """Advance the epidemic by exactly one day.
 
@@ -137,14 +132,14 @@ class DiseaseEngine:
             if contacted by several infectious individuals).
         """
         infectious_ids = [ind.id for ind in self.individuals
-                          if ind.state is State.INFECTIOUS]
+                          if ind.state is State.INFECTIOUS and ind.present]
         newly_exposed: List[int] = []
         exposed_set = set()
 
         for src in infectious_ids:
             for target_id in self.contact_model.contacts(src, self._rng):
                 target = self.individuals[int(target_id)]
-                if (target.state is State.SUSCEPTIBLE
+                if (target.state is State.SUSCEPTIBLE and target.present
                         and target.id not in exposed_set):
                     if self._rng.random() < self.infection_probability:
                         exposed_set.add(target.id)
@@ -160,6 +155,8 @@ class DiseaseEngine:
         new_infectious = 0
         new_recovered = 0
         for ind in self.individuals:
+            if not ind.present:
+                continue
             if ind.state is State.EXPOSED:
                 ind.days_in_state += 1
                 if ind.days_in_state >= self.incubation_days:
@@ -174,9 +171,9 @@ class DiseaseEngine:
                     new_recovered += 1
         return new_infectious, new_recovered
 
-    # ------------------------------------------------------------------
+    # 
     # Convenience accessors
-    # ------------------------------------------------------------------
+    # 
     def counts(self) -> Dict[str, int]:
         """Return the current number of individuals in each compartment.
 
@@ -208,3 +205,30 @@ class DiseaseEngine:
         """
         return any(ind.state in (State.EXPOSED, State.INFECTIOUS)
                    for ind in self.individuals)
+
+    def advance_state(self, state: State, days_in_state: int) -> tuple[State, int]:
+        """Apply one day of ``E -> I -> R`` progression to a detached state.
+
+        This is the same time-based progression used for residents, exposed as
+        a pure function so the travel layer can age a person's disease while
+        they are away from home *without* re-implementing disease timing. It
+        performs no transmission.
+
+        Args:
+            state: The current disease state.
+            days_in_state: Days already spent in that state.
+
+        Returns:
+            The ``(state, days_in_state)`` after advancing one day.
+        """
+        if state is State.EXPOSED:
+            days_in_state += 1
+            if days_in_state >= self.incubation_days:
+                return State.INFECTIOUS, 0
+            return State.EXPOSED, days_in_state
+        if state is State.INFECTIOUS:
+            days_in_state += 1
+            if days_in_state >= self.infectious_days:
+                return State.RECOVERED, 0
+            return State.INFECTIOUS, days_in_state
+        return state, days_in_state

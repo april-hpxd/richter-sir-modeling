@@ -33,6 +33,33 @@ from simulation import DailyRecord
 
 
 @dataclass
+class DiseaseToken:
+    """A detached snapshot of one person's disease state.
+
+    Carried by the travel layer while a resident is away, so their disease can
+    progress and change city-to-city without the engine needing to track where
+    they are. Mutable: the travel layer updates it in place each day.
+    """
+
+    state: State
+    days_in_state: int
+
+
+@dataclass
+class VisitDayResult:
+    """Outcome of one day a visitor spends in a host city.
+
+    Attributes:
+        infected_resident_ids: Residents the (infectious) visitor exposed.
+        acquired_from: Id of the infectious resident that exposed the visitor
+            this day, or ``None`` if the visitor was not newly infected.
+    """
+
+    infected_resident_ids: List[int]
+    acquired_from: Optional[int]
+
+
+@dataclass
 class CityConfig:
     """Configuration specific to one city (a subset of the global Config).
 
@@ -304,6 +331,81 @@ class City:
         individual.days_in_state = 0
         return True
 
+    # 
+    # Travel support (relocating residents; hosting visitors)
+    # 
+    def checkout(self, individual_id: int) -> DiseaseToken:
+        """Mark a resident as away and return a token carrying their state.
+
+        While away the individual is skipped by this city's transmission and
+        progression (they are not physically here) but remains in the census so
+        their evolving state can still be mirrored via :meth:`sync_absent`.
+        """
+        ind = self.engine.individuals[individual_id]
+        ind.present = False
+        return DiseaseToken(state=ind.state, days_in_state=ind.days_in_state)
+
+    def sync_absent(self, individual_id: int, token: DiseaseToken) -> None:
+        """Mirror an away resident's evolving state into the census (stays away)."""
+        ind = self.engine.individuals[individual_id]
+        ind.state = token.state
+        ind.days_in_state = token.days_in_state
+
+    def checkin(self, individual_id: int, token: DiseaseToken) -> None:
+        """Return an away resident home, writing back their final state."""
+        ind = self.engine.individuals[individual_id]
+        ind.state = token.state
+        ind.days_in_state = token.days_in_state
+        ind.present = True
+
+    def host_visitor_day(self, token: DiseaseToken,
+                         rng: Generator) -> VisitDayResult:
+        """Run one day for a visitor in this city, then age their disease.
+
+        Interaction is network-based (the visitor shares a random host's
+        contacts) and bidirectional, mirroring resident transmission: an
+        infectious visitor may expose susceptible residents, and a susceptible
+        visitor may be infected by infectious residents. The visitor's own
+        state then progresses one day. All disease timing and probabilities
+        come from this city's engine -- the travel layer supplies only the
+        traveler and the RNG.
+
+        Args:
+            token: The visitor's disease token (mutated in place).
+            rng: The generator to draw interaction outcomes from.
+
+        Returns:
+            A :class:`VisitDayResult` describing this day's transmissions.
+        """
+        p = self.config.infection_probability
+        host_id = int(rng.integers(0, self.config.population_size))
+        contacts = np.unique(np.append(self.contacts_of(host_id, rng), host_id))
+
+        infected: List[int] = []
+        acquired_from: Optional[int] = None
+
+        if token.state is State.INFECTIOUS:
+            for cid in contacts:
+                resident = self.engine.individuals[int(cid)]
+                if (resident.present and resident.state is State.SUSCEPTIBLE
+                        and rng.random() < p and self.expose(int(cid))):
+                    infected.append(int(cid))
+        elif token.state is State.SUSCEPTIBLE:
+            for cid in contacts:
+                resident = self.engine.individuals[int(cid)]
+                if (resident.present and resident.state is State.INFECTIOUS
+                        and rng.random() < p):
+                    token.state = State.EXPOSED
+                    token.days_in_state = 0
+                    acquired_from = int(cid)
+                    break
+
+        # Age the visitor's disease one day (E -> I -> R), same timing as home
+        token.state, token.days_in_state = self.engine.advance_state(
+            token.state, token.days_in_state)
+        return VisitDayResult(infected_resident_ids=infected,
+                              acquired_from=acquired_from)
+
     def set_individual_state(self, individual_id: int, state: State) -> None:
         """Forcibly set an individual's disease state.
 
@@ -341,6 +443,10 @@ class City:
                 "final_susceptible": float(self.config.population_size),
                 "final_recovered": 0.0,
                 "first_infection_day": -1.0,
+                "peak_recovered": 0.0,
+                "peak_recovered_day": -1.0,
+                "day_outbreak_began": -1.0,
+                "day_outbreak_peaked": -1.0,
                 "imported_infections": float(self.imported_infections),
             }
 
@@ -351,12 +457,9 @@ class City:
         total_infected = population - final.susceptible
         attack_rate = total_infected / population if population else 0.0
 
-        peak_inf = max(
-            self.history, key=lambda r: r.infectious
-        ) if self.history else self.history[0]
-        peak_exp = max(
-            self.history, key=lambda r: r.exposed
-        ) if self.history else self.history[0]
+        peak_inf = max(self.history, key=lambda r: r.infectious)
+        peak_exp = max(self.history, key=lambda r: r.exposed)
+        peak_rec = max(self.history, key=lambda r: r.recovered)
 
         # Find first day with any infection (E or I)
         first_infection_day = -1
@@ -382,5 +485,10 @@ class City:
             "final_susceptible": float(final.susceptible),
             "final_recovered": float(final.recovered),
             "first_infection_day": float(first_infection_day),
+            "peak_recovered": float(peak_rec.recovered),
+            "peak_recovered_day": float(peak_rec.day),
+            # Convenience aliases requested by the milestone spec.
+            "day_outbreak_began": float(first_infection_day),
+            "day_outbreak_peaked": float(peak_inf.day),
             "imported_infections": float(self.imported_infections),
         }

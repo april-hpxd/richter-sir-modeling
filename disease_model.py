@@ -1,7 +1,6 @@
 """Core disease-domain data types: the SEIR states and the individual.
 
 SEIR compartments
------------------
 * ``S`` Susceptible  -- can catch the disease.
 * ``E`` Exposed      -- infected and incubating, but **not yet infectious**.
 * ``I`` Infectious   -- can transmit to susceptible contacts.
@@ -46,8 +45,16 @@ class Individual:
         days_in_state: Number of complete days spent in the current state.
             Reset to ``0`` on every transition; used to time ``E -> I`` and
             ``I -> R`` progressions.
+        present: Whether the individual is currently participating in their
+            home city's dynamics. Set ``False`` while the person is away
+            travelling: they are still counted in the census (so their state
+            can be mirrored and animated) but the engine neither transmits to
+            nor progresses them locally -- the travel layer drives them while
+            they are elsewhere. This is a generic presence concept; the engine
+            never learns *why* someone is absent.
     """
 
     id: int
     state: State = State.SUSCEPTIBLE
     days_in_state: int = 0
+    present: bool = True
