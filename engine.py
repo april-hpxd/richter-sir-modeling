@@ -9,8 +9,9 @@ Worked example (incubation 2, infectious 6), for a person exposed on day 0::
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 from numpy.random import Generator
 
 from disease_model import Individual, State
@@ -37,6 +38,9 @@ class DiseaseEngine:
         incubation_days: int,
         infectious_days: int,
         rng: Generator,
+        id_prefix: str = "",
+        behavioral_response_factor: Optional[float] = None,
+        isolation_contact_multiplier: float = 1.0,
     ) -> None:
         """Initialise the engine with everyone Susceptible.
 
@@ -48,6 +52,15 @@ class DiseaseEngine:
             incubation_days: Duration of the ``EXPOSED`` period.
             infectious_days: Duration of the ``INFECTIOUS`` period.
             rng: The single shared NumPy generator driving all randomness.
+            id_prefix: Prepended to local ids when stamping ``infected_by``,
+                e.g. ``"city0-"`` in a regional run, so ids stay globally
+                unique across cities. Empty for a bare single-city run.
+            behavioral_response_factor: If set, an infectious individual's
+                daily contacts are subsampled to this fraction of normal
+                (e.g. ``0.5`` halves them). ``None`` disables the behavior.
+            isolation_contact_multiplier: Extra multiplier applied on top of
+                ``behavioral_response_factor`` while this city is isolated
+                (see :meth:`set_isolated`); ``1.0`` is a no-op.
         """
         self.individuals: List[Individual] = [
             Individual(id=i) for i in range(population_size)
@@ -58,6 +71,13 @@ class DiseaseEngine:
         self.infectious_days = infectious_days
         self._rng = rng
         self.day: int = 0
+        self.id_prefix = id_prefix
+        self.behavioral_response_factor = behavioral_response_factor
+        self.isolation_contact_multiplier = isolation_contact_multiplier
+        self.isolated = False
+        # Actual contact-array length drawn by each infectious individual on
+        # the most recent step(); read by the node export for `contacts_today`.
+        self.last_contact_counts: Dict[int, int] = {}
 
     # 
     # Seeding
@@ -87,8 +107,12 @@ class DiseaseEngine:
             )
         chosen = self._rng.choice(susceptible, size=count, replace=False)
         for cid in chosen:
-            self.individuals[int(cid)].state = State.EXPOSED
-            self.individuals[int(cid)].days_in_state = 0
+            ind = self.individuals[int(cid)]
+            ind.state = State.EXPOSED
+            ind.days_in_state = 0
+            ind.infected_by = None
+            ind.infection_generation = 0
+            ind.infection_day = self.day
         return [int(c) for c in chosen]
 
     # 
@@ -102,49 +126,138 @@ class DiseaseEngine:
 
         Returns:
             A dict with the day's flows: ``new_exposed``, ``new_infectious``,
-            and ``new_recovered``.
+            ``new_recovered``, and ``transmissions`` (a list of
+            ``(source_id, target_id)`` pairs newly exposed today, for
+            visualization and transmission tracking).
         """
         newly_exposed = self._transmit()
         new_infectious, new_recovered = self._progress()
 
         # Commit new exposures last, so they are not aged this day.
-        for cid in newly_exposed:
-            self.individuals[cid].state = State.EXPOSED
-            self.individuals[cid].days_in_state = 0
+        next_day = self.day + 1
+        for target_id, source_id in newly_exposed:
+            ind = self.individuals[target_id]
+            ind.state = State.EXPOSED
+            ind.days_in_state = 0
+            ind.infection_day = next_day
+            if source_id is None:
+                ind.infected_by = None
+                ind.infection_generation = 0
+            else:
+                source = self.individuals[source_id]
+                ind.infected_by = f"{self.id_prefix}{source_id}"
+                ind.infection_generation = source.infection_generation + 1
 
-        self.day += 1
+        self.day = next_day
         return {
             "new_exposed": len(newly_exposed),
             "new_infectious": new_infectious,
             "new_recovered": new_recovered,
+            "transmissions": [(s, t) for t, s in newly_exposed],
         }
 
-    def _transmit(self) -> List[int]:
+    def _transmit(self) -> List[Tuple[int, Optional[int]]]:
         """Compute today's new exposures from start-of-day infectious contacts.
 
         Every individual infectious at the start of the day meets the contacts
-        supplied by the interaction layer; each susceptible contact is exposed
-        with probability ``infection_probability``. Recovered and already-
-        exposed contacts are immune to (re)infection.
+        supplied by the interaction layer (via :meth:`effective_contacts`, so
+        any configured behavioral response is applied); each susceptible
+        contact is exposed with probability ``infection_probability``.
+        Recovered and already-exposed contacts are immune to (re)infection.
 
         Returns:
-            The ids of individuals newly exposed today (each listed once, even
-            if contacted by several infectious individuals).
+            A list of ``(target_id, source_id)`` pairs newly exposed today
+            (each target listed once, even if contacted by several infectious
+            individuals -- attributed to whichever source triggered it first).
         """
         infectious_ids = [ind.id for ind in self.individuals
                           if ind.state is State.INFECTIOUS and ind.present]
-        newly_exposed: List[int] = []
+        newly_exposed: List[Tuple[int, Optional[int]]] = []
         exposed_set = set()
+        contact_counts: Dict[int, int] = {}
 
         for src in infectious_ids:
-            for target_id in self.contact_model.contacts(src, self._rng):
+            contacts = self.effective_contacts(src, self._rng)
+            contact_counts[src] = len(contacts)
+            for target_id in contacts:
                 target = self.individuals[int(target_id)]
                 if (target.state is State.SUSCEPTIBLE and target.present
                         and target.id not in exposed_set):
                     if self._rng.random() < self.infection_probability:
                         exposed_set.add(target.id)
-                        newly_exposed.append(target.id)
+                        newly_exposed.append((target.id, src))
+        self.last_contact_counts = contact_counts
         return newly_exposed
+
+    def nominal_contacts(self, individual_id: int) -> int:
+        """Return this individual's normal (unreduced) daily contact count.
+
+        For network-based models this is their persistent graph degree; for
+        well-mixed it is the configured ``daily_contacts``. Used by the node
+        export as `contacts_today` for anyone who wasn't infectious today
+        (and therefore has no drawn count in :attr:`last_contact_counts`).
+        """
+        graph = getattr(self.contact_model, "graph", None)
+        if graph is not None:
+            return int(graph.degree(individual_id))
+        return int(getattr(self.contact_model, "daily_contacts", 0))
+
+    def effective_contacts(self, individual_id: int, rng: Generator) -> np.ndarray:
+        """Return the contacts an infectious individual uses today.
+
+        Wraps :attr:`contact_model` with the optional behavioral-response and
+        isolation subsampling, so every call site (in-city transmission and
+        hosted travelers alike) reduces contacts identically once someone is
+        infectious. With no behavioral response configured and the city not
+        isolated, this is exactly ``contact_model.contacts(...)``.
+
+        Args:
+            individual_id: The (infectious) individual seeking contacts.
+            rng: The shared random generator.
+
+        Returns:
+            A 1-D array of other individual ids.
+        """
+        contacts = self.contact_model.contacts(individual_id, rng)
+        return self.subsample_contacts(contacts, rng)
+
+    def subsample_contacts(self, contacts: np.ndarray, rng: Generator) -> np.ndarray:
+        """Apply this engine's behavioral-response/isolation reduction to a
+        pre-computed contact array.
+
+        Shared by :meth:`effective_contacts` (residents) and
+        :meth:`city.City.host_visitor_day` (an infectious visitor uses the
+        destination city's contact-reduction policy while physically there).
+
+        Args:
+            contacts: The full, un-reduced contact array.
+            rng: The shared random generator.
+
+        Returns:
+            ``contacts``, or a subsampled subset if a reduction is active.
+        """
+        factor = 1.0
+        if self.behavioral_response_factor is not None:
+            factor *= self.behavioral_response_factor
+        if self.isolated:
+            factor *= self.isolation_contact_multiplier
+        if factor >= 1.0 or len(contacts) == 0:
+            return contacts
+        k = max(1, round(len(contacts) * factor))
+        if k >= len(contacts):
+            return contacts
+        chosen = rng.choice(len(contacts), size=k, replace=False)
+        return contacts[chosen]
+
+    def set_isolated(self, isolated: bool) -> None:
+        """Toggle whether this engine's population is under isolation.
+
+        While isolated, :meth:`effective_contacts` applies
+        ``isolation_contact_multiplier`` in addition to any behavioral
+        response. Travel restrictions during isolation are handled
+        separately by :class:`~travel.TravelManager`.
+        """
+        self.isolated = isolated
 
     def _progress(self) -> tuple[int, int]:
         """Age start-of-day infected individuals and apply ``E->I``/``I->R``.
@@ -168,6 +281,7 @@ class DiseaseEngine:
                 if ind.days_in_state >= self.infectious_days:
                     ind.state = State.RECOVERED
                     ind.days_in_state = 0
+                    ind.recovery_day = self.day + 1
                     new_recovered += 1
         return new_infectious, new_recovered
 

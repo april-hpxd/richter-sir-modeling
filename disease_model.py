@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
+from typing import Optional
 
 
 class State(enum.Enum):
@@ -52,9 +53,42 @@ class Individual:
             nor progresses them locally -- the travel layer drives them while
             they are elsewhere. This is a generic presence concept; the engine
             never learns *why* someone is absent.
+        infected_by: Global id of the source who exposed this individual, as
+            ``"{city_id}-{local_id}"`` (or just the local id for a
+            single-city run without a notion of city). ``None`` for a never-
+            infected individual or an initial seeded case.
+        infection_generation: Transmission generation: ``0`` for seeded
+            cases, otherwise one more than the source's generation.
+        infection_day: The day (matching :class:`~simulation.DailyRecord.day`)
+            this individual became ``EXPOSED``, or ``None`` if never infected.
+        recovery_day: The day this individual became ``RECOVERED``, or
+            ``None`` if not yet recovered.
     """
 
     id: int
     state: State = State.SUSCEPTIBLE
     days_in_state: int = 0
     present: bool = True
+    infected_by: Optional[str] = None
+    infection_generation: int = 0
+    infection_day: Optional[int] = None
+    recovery_day: Optional[int] = None
+
+
+@dataclass
+class PersonSnapshot:
+    """One individual's exportable state on one day.
+
+    A lightweight, per-day copy of the fields the node-level CSV export
+    (``node_export.py``) and the visualization need, kept separate from the
+    live :class:`Individual` so recorded history doesn't alias mutable state.
+    """
+
+    id: int
+    state: State
+    days_in_state: int
+    infected_by: Optional[str]
+    infection_generation: int
+    infection_day: Optional[int]
+    recovery_day: Optional[int]
+    contacts_today: int

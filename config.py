@@ -108,6 +108,16 @@ class Config:
     daily_travel_rate: float = 0.1
     trip_duration_distribution: Tuple[Tuple[int, float], ...] = ((1, 1.0),)
 
+    # --- Behavioral response (contact reduction while infectious) --------
+    behavioral_response_enabled: bool = False
+    behavioral_response_factor: float = 0.5
+
+    # --- City isolation intervention --------------------------------------
+    isolation_enabled: bool = False
+    isolation_infectious_threshold: float = 0.5
+    isolation_travel_multiplier: float = 0.0
+    isolation_contact_multiplier: float = 1.0
+
     # --- Output -----------------------------------------------------------
     visualization_mode: str = "auto"
     heatmap_tile_fraction: float = 0.05
@@ -162,6 +172,14 @@ class Config:
                 f"visualization_mode must be one of {VISUALIZATION_MODES}.")
         if not 0.01 <= self.heatmap_tile_fraction <= 0.5:
             raise ValueError("heatmap_tile_fraction must be in [0.01, 0.5].")
+        if not 0.0 < self.behavioral_response_factor <= 1.0:
+            raise ValueError("behavioral_response_factor must be in (0, 1].")
+        if not 0.0 <= self.isolation_infectious_threshold <= 1.0:
+            raise ValueError("isolation_infectious_threshold must be in [0, 1].")
+        if not 0.0 <= self.isolation_travel_multiplier <= 1.0:
+            raise ValueError("isolation_travel_multiplier must be in [0, 1].")
+        if not 0.0 <= self.isolation_contact_multiplier <= 1.0:
+            raise ValueError("isolation_contact_multiplier must be in [0, 1].")
 
         # Resolved regional structure.
         sizes = self.city_sizes()

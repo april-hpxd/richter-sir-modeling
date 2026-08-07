@@ -12,10 +12,11 @@ from __future__ import annotations
 import csv
 import itertools
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
+from analysis import mean_and_ci
 from config import Config
 from regional_simulation import RegionalSimulation
 
@@ -89,10 +90,10 @@ def run_experiment(base_config: Config, num_runs: int = 100,
         values = [float(getter(r)) for r in runs if getter(r) is not None]
         values = [v for v in values if v >= 0]
         if not values:
-            return {"mean": float("nan"), "std": float("nan"), "n": 0}
-        arr = np.array(values, dtype=float)
-        return {"mean": float(arr.mean()), "std": float(arr.std(ddof=0)),
-                "n": len(values)}
+            return {"mean": float("nan"), "std": float("nan"), "n": 0,
+                    "ci95": float("nan")}
+        mean, std, ci95 = mean_and_ci(values)
+        return {"mean": mean, "std": std, "n": len(values), "ci95": ci95}
 
     return {
         "num_runs": num_runs,
@@ -108,6 +109,44 @@ def run_experiment(base_config: Config, num_runs: int = 100,
     }
 
 
+def write_experiment_csv(result: Dict, path: str) -> None:
+    """Write a batch experiment's per-run results and aggregates to CSV.
+
+    One row per run (seed + every :class:`RunResult` field), followed by a
+    blank line and a compact ``metric, mean, std, ci95, n`` aggregate block,
+    so the same file supports both re-analysis of individual runs and a
+    quick read of the headline numbers.
+
+    Args:
+        result: The dict returned by :func:`run_experiment`.
+        path: Destination CSV path.
+    """
+    runs: List[RunResult] = result["runs"]
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow([
+            "seed", "average_arrival_delay", "cities_reached",
+            "peak_regional_infectious", "peak_regional_infectious_day",
+            "epidemic_duration", "total_infected", "attack_rate",
+            "imported_infections",
+        ])
+        for r in runs:
+            writer.writerow([
+                r.seed, r.average_arrival_delay, r.cities_reached,
+                r.peak_regional_infectious, r.peak_regional_infectious_day,
+                r.epidemic_duration, r.total_infected, r.attack_rate,
+                r.imported_infections,
+            ])
+        writer.writerow([])
+        writer.writerow(["metric", "mean", "std", "ci95", "n"])
+        for key in ("average_outbreak_delay", "cities_reached",
+                    "peak_infections", "peak_infection_day",
+                    "epidemic_duration", "attack_rate", "imported_infections"):
+            a = result[key]
+            writer.writerow([key, a["mean"], a["std"], a["ci95"], a["n"]])
+    print(f"Wrote {len(runs)} experiment runs to {path}")
+
+
 def print_experiment_report(result: Dict, config: Config) -> None:
     """Pretty-print an experiment aggregate to stdout."""
     def line(label: str, key: str, scale: float = 1.0, unit: str = "") -> None:
@@ -116,7 +155,8 @@ def print_experiment_report(result: Dict, config: Config) -> None:
             print(f"  {label:<26} n/a")
         else:
             print(f"  {label:<26} {a['mean'] * scale:7.2f} +/- "
-                  f"{a['std'] * scale:6.2f}{unit}  (n={a['n']})")
+                  f"{a['std'] * scale:6.2f}{unit}  "
+                  f"(95% CI +/-{a['ci95'] * scale:.2f}, n={a['n']})")
 
     print("\n" + "=" * 60)
     print(f"  EXPERIMENT: {result['num_runs']} runs "
@@ -226,3 +266,57 @@ def write_sensitivity_csv(rows: List[Dict[str, Any]], path: str,
         writer.writeheader()
         writer.writerows(rows)
     print(f"Wrote {len(rows)} sensitivity-analysis rows to {path}")
+
+
+#
+# Travel-rate comparison: a convenience wrapper over the generic sweep
+#
+def run_travel_rate_sweep(base_config: Config,
+                          rates: Sequence[float] = (0.0, 0.05, 0.1, 0.15, 0.2),
+                          runs_per_combo: int = 5, base_seed: int = 0,
+                          csv_path: Optional[str] = None,
+                          verbose: bool = False) -> List[Dict[str, Any]]:
+    """Compare outcomes across a range of daily travel rates.
+
+    A thin wrapper over :func:`run_sensitivity_analysis` sweeping only
+    ``daily_travel_rate``, plus a printed comparison table (arrival day,
+    peak infections, attack rate, epidemic duration per rate) -- the
+    generic sweep already produces everything this needs, so no new
+    simulation machinery is added here.
+
+    Args:
+        base_config: Template configuration; each rate overrides
+            ``daily_travel_rate``.
+        rates: Daily travel rates to compare.
+        runs_per_combo: Independent seeds run per rate.
+        base_seed: First seed of the ``base_seed .. base_seed +
+            runs_per_combo - 1`` set reused for every rate.
+        csv_path: If given, write every individual run to this CSV path.
+        verbose: If True, print a progress line per run.
+
+    Returns:
+        The list of per-run result rows, as in :func:`run_sensitivity_analysis`.
+    """
+    rows = run_sensitivity_analysis(
+        base_config, {"daily_travel_rate": list(rates)},
+        runs_per_combo=runs_per_combo, base_seed=base_seed,
+        csv_path=csv_path, verbose=verbose)
+
+    print("\n" + "=" * 66)
+    print("  TRAVEL RATE COMPARISON")
+    print("=" * 66)
+    print(f"  {'rate':>6} {'arrival day':>12} {'peak infect.':>13} "
+          f"{'attack rate':>12} {'duration':>9}")
+    for rate in rates:
+        combo_rows = [r for r in rows if r["daily_travel_rate"] == rate]
+        if not combo_rows:
+            continue
+        arrival = np.mean([r["average_arrival_delay"] for r in combo_rows
+                           if r["average_arrival_delay"] >= 0] or [float("nan")])
+        peak = np.mean([r["peak_regional_infectious"] for r in combo_rows])
+        attack = np.mean([r["attack_rate"] for r in combo_rows])
+        duration = np.mean([r["epidemic_duration"] for r in combo_rows])
+        print(f"  {rate:>6.2%} {arrival:>12.1f} {peak:>13.1f} "
+              f"{100 * attack:>11.1f}% {duration:>9.1f}")
+    print("=" * 66 + "\n")
+    return rows

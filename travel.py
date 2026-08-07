@@ -19,7 +19,7 @@ reproducible from one seed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import Dict, List
 
 import numpy as np
 from numpy.random import Generator
@@ -113,7 +113,9 @@ class TravelManager:
         self.cities = cities
         self.rng = rng
 
-        self.matrix = config.travel_probability_matrix()
+        self._base_matrix = config.travel_probability_matrix()
+        self.matrix = self._base_matrix.copy()
+        self._isolated = [False] * len(cities)
         self._durations, self._duration_probs = config.trip_durations()
 
         # Fixed eligible-commuter pool per city (sorted for deterministic order).
@@ -214,7 +216,9 @@ class TravelManager:
         still_active: List[Traveler] = []
         for tr in self.active:
             dest = self.cities[tr.current_city_id]
-            result = dest.host_visitor_day(tr.token, self.rng)
+            visitor_global_id = f"{tr.home_city_id}-{tr.home_individual_id}"
+            result = dest.host_visitor_day(tr.token, self.rng, day,
+                                           visitor_global_id)
 
             # Residents this infectious visitor exposed -> imported to dest.
             for rid in result.infected_resident_ids:
@@ -268,3 +272,31 @@ class TravelManager:
                 still_active.append(tr)
         self.active = still_active
         return returned
+
+    def current_locations(self) -> List[Dict[int, int]]:
+        """Return, per city, ``{home_individual_id: current_city_id}`` for
+        residents currently travelling (empty dict if none away).
+
+        Used by :class:`~city.City` to record each day's traveler locations
+        for the node export and the visualization's traveler highlight.
+        """
+        locations: List[Dict[int, int]] = [dict() for _ in self.cities]
+        for tr in self.active:
+            locations[tr.home_city_id][tr.home_individual_id] = tr.current_city_id
+        return locations
+
+    def set_city_isolated(self, city_id: int, isolated: bool) -> None:
+        """Scale a city's travel row/column by the isolation multiplier.
+
+        While isolated, every entry in ``city_id``'s row and column of the
+        live matrix is ``base * isolation_travel_multiplier`` (restored to
+        the base value once lifted). The diagonal stays zero either way.
+        """
+        if self._isolated[city_id] == isolated:
+            return
+        self._isolated[city_id] = isolated
+        multiplier = (self.config.isolation_travel_multiplier if isolated
+                     else 1.0)
+        self.matrix[city_id, :] = self._base_matrix[city_id, :] * multiplier
+        self.matrix[:, city_id] = self._base_matrix[:, city_id] * multiplier
+        self.matrix[city_id, city_id] = 0.0

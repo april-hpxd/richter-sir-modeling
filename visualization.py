@@ -14,6 +14,7 @@ import networkx as nx
 import numpy as np
 from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.collections import LineCollection
+from matplotlib.colors import to_rgba
 from matplotlib.patches import FancyArrowPatch, Patch
 
 from config import CLUSTER_MAX_POPULATION, Config, NETWORK_MAX_POPULATION
@@ -104,13 +105,113 @@ def _draw_network_edges(ax, graph, coords: np.ndarray) -> None:
     ))
 
 
+#
+# Node highlight helpers: newly infected, fading recovered, traveler rings,
+# and brief transmission flashes. Positions never change -- only colour,
+# marker edge, and short-lived overlay artists do.
+#
+RECOVERED_FADE_DAYS = 15
+RECOVERED_MIN_ALPHA = 0.35
+NEWLY_INFECTED_RING_COLOR = "#ffd60a"
+TRAVELER_RING_COLOR = "#4062bb"
+TRANSMISSION_FADE_FRAMES = 3
+
+
+def _recovered_run_lengths(state_frames: List[List[State]]) -> np.ndarray:
+    """Return, for every ``(frame, node)``, consecutive days spent RECOVERED.
+
+    A pure function over the existing per-day state snapshots -- no new data
+    is recorded to support the recovered-node fade effect.
+    """
+    is_recovered = np.array(
+        [[s is State.RECOVERED for s in frame] for frame in state_frames])
+    lengths = np.zeros_like(is_recovered, dtype=int)
+    for f in range(len(state_frames)):
+        if f == 0:
+            lengths[f] = is_recovered[f].astype(int)
+        else:
+            lengths[f] = np.where(is_recovered[f], lengths[f - 1] + 1, 0)
+    return lengths
+
+
+def _newly_infected_mask(state_frames: List[List[State]], frame: int) -> np.ndarray:
+    """Boolean mask of nodes that just became EXPOSED on ``frame``."""
+    current = state_frames[frame]
+    if frame == 0:
+        return np.array([s is State.EXPOSED for s in current], dtype=bool)
+    previous = state_frames[frame - 1]
+    return np.array([
+        current[i] is State.EXPOSED and previous[i] is not State.EXPOSED
+        for i in range(len(current))
+    ], dtype=bool)
+
+
+def _face_colors_with_fade(states: List[State],
+                           recovered_ages: np.ndarray) -> np.ndarray:
+    """Per-node RGBA face colours: normal state colours, recovered ones faded."""
+    colors = np.zeros((len(states), 4))
+    for i, s in enumerate(states):
+        if s is State.RECOVERED:
+            frac = min(1.0, float(recovered_ages[i]) / RECOVERED_FADE_DAYS)
+            alpha = 1.0 - frac * (1.0 - RECOVERED_MIN_ALPHA)
+            colors[i] = to_rgba(STATE_COLOR[s], alpha)
+        else:
+            colors[i] = to_rgba(STATE_COLOR[s])
+    return colors
+
+
+def _edge_styling(n: int, newly_infected: np.ndarray,
+                  traveling: Optional[np.ndarray] = None):
+    """Per-node marker edge colours/widths highlighting new cases and travelers."""
+    edgecolors = np.full(n, "#555555", dtype=object)
+    linewidths = np.full(n, 0.5)
+    if traveling is not None:
+        edgecolors[traveling] = TRAVELER_RING_COLOR
+        linewidths[traveling] = 1.6
+    edgecolors[newly_infected] = NEWLY_INFECTED_RING_COLOR
+    linewidths[newly_infected] = 2.4
+    return list(edgecolors), list(linewidths)
+
+
+def _draw_transmission_flashes(ax, coords: np.ndarray,
+                               transmission_frames: List[List],
+                               frame: int, fig=None):
+    """Return short-lived line artists for recent in-city transmissions.
+
+    Mirrors the inter-city "string" fade already used for cross-city links,
+    at the scale of one city's own node positions.
+    """
+    artists = []
+    for age in range(min(frame + 1, TRANSMISSION_FADE_FRAMES + 1)):
+        day = frame - age
+        if day < 0 or day >= len(transmission_frames):
+            continue
+        alpha = 0.9 * (1.0 - age / (TRANSMISSION_FADE_FRAMES + 1))
+        for source, target in transmission_frames[day]:
+            line = ax.plot(
+                [coords[source, 0], coords[target, 0]],
+                [coords[source, 1], coords[target, 1]],
+                color=NEWLY_INFECTED_RING_COLOR, linewidth=1.6,
+                alpha=max(0.05, alpha), zorder=4, solid_capstyle="round",
+            )[0]
+            artists.append(line)
+    return artists
+
+
 def animate_states(state_frames: List[List[State]], history: List[DailyRecord],
                    config: Config, layout: str = "grid",
                    save_path: Optional[str] = None,
                    show: bool = False,
                    interval_ms: int = 400,
-                   graph=None) -> FuncAnimation:
+                   graph=None,
+                   transmission_frames: Optional[List[List]] = None
+                   ) -> FuncAnimation:
     """Animate per-individual state changes on a fixed layout.
+
+    Beyond simple S/E/I/R colouring, a node gets a gold ring the day it's
+    newly exposed, a brief flash line to whoever infected it, and recovered
+    nodes gradually fade (lower alpha) the longer they've been immune.
+    Positions never move -- only colour and these highlights change.
 
     Args:
         state_frames: Per-day list of per-individual states (from
@@ -123,6 +224,9 @@ def animate_states(state_frames: List[List[State]], history: List[DailyRecord],
         show: If ``True``, display the animation window.
         interval_ms: Delay between frames in milliseconds.
         graph: Optional persistent contact graph to render behind the nodes.
+        transmission_frames: Per-day ``(source_id, target_id)`` exposure pairs
+            (from :attr:`~simulation.Simulation.transmission_frames`), used
+            for the transmission flash. ``None`` disables the effect.
 
     Returns:
         The :class:`~matplotlib.animation.FuncAnimation`. Keep a reference to it
@@ -132,6 +236,7 @@ def animate_states(state_frames: List[List[State]], history: List[DailyRecord],
     positions = (circle_layout(n) if layout == "circle"
                  else grid_layout(n))
     coords = np.array(positions)
+    recovered_ages = _recovered_run_lengths(state_frames)
 
     fig, ax = plt.subplots(figsize=(8, 5))
     fig.suptitle("SEIR epidemic contact network of "
@@ -139,11 +244,13 @@ def animate_states(state_frames: List[List[State]], history: List[DailyRecord],
 
     _draw_network_edges(ax, graph, coords)
 
-    marker_size = max(80, min(600, 12000 / n))
+    marker_size = max(90, min(600, 12000 / n))
+    edgecolors0, linewidths0 = _edge_styling(
+        n, _newly_infected_mask(state_frames, 0))
     scatter = ax.scatter(
         coords[:, 0], coords[:, 1], s=marker_size,
-        c=[STATE_COLOR[s] for s in state_frames[0]],
-        edgecolors="#555555", linewidths=0.5, zorder=2)
+        c=_face_colors_with_fade(state_frames[0], recovered_ages[0]),
+        edgecolors=edgecolors0, linewidths=linewidths0, zorder=2)
 
     ax.set_aspect("equal")
     ax.axis("off")
@@ -155,19 +262,30 @@ def animate_states(state_frames: List[List[State]], history: List[DailyRecord],
 
     day_text = ax.text(0.01, 0.99, "", transform=ax.transAxes, va="top",
                        ha="left", family="monospace", fontsize=10)
+    flash_artists: List = []
 
     def update(frame: int):
         """Recolour every marker to its state on day ``frame``."""
+        nonlocal flash_artists
         states = state_frames[frame]
-        scatter.set_color([STATE_COLOR[s] for s in states])
-        # set_color drops the edge styling; restore it for crisp markers.
-        scatter.set_edgecolors("#555555")
+        newly_infected = _newly_infected_mask(state_frames, frame)
+        scatter.set_facecolor(_face_colors_with_fade(states, recovered_ages[frame]))
+        edgecolors, linewidths = _edge_styling(n, newly_infected)
+        scatter.set_edgecolors(edgecolors)
+        scatter.set_linewidths(linewidths)
+
+        while flash_artists:
+            flash_artists.pop().remove()
+        if transmission_frames:
+            flash_artists = _draw_transmission_flashes(
+                ax, coords, transmission_frames, frame)
+
         rec = history[frame]
         day_text.set_text(
             f"Day {rec.day}\n"
             f"S={rec.susceptible}  E={rec.exposed}  "
             f"I={rec.infectious}  R={rec.recovered}")
-        return scatter, day_text
+        return [scatter, day_text] + flash_artists
 
     anim = FuncAnimation(fig, update, frames=len(state_frames),
                          interval=interval_ms, blit=False, repeat=False)
@@ -277,6 +395,8 @@ def animate_regional_states(regional_sim: RegionalSimulation,
     scatters = []
     day_texts = []
     coords_per_city: List[np.ndarray] = []
+    recovered_ages_per_city = [_recovered_run_lengths(city.state_frames)
+                              for city in cities]
 
     for city_idx, (ax, city, positions) in enumerate(
         zip(axes, cities, positions_per_city)
@@ -284,11 +404,14 @@ def animate_regional_states(regional_sim: RegionalSimulation,
         coords = np.array(positions)
         coords_per_city.append(coords)
         _draw_network_edges(ax, city.network, coords)
-        marker_size = max(20, min(600, 12000 / max(1, sizes[city_idx])))
+        marker_size = max(40, min(600, 12000 / max(1, sizes[city_idx])))
+        edgecolors0, linewidths0 = _edge_styling(
+            sizes[city_idx], _newly_infected_mask(city.state_frames, 0))
         scatter = ax.scatter(
             coords[:, 0], coords[:, 1], s=marker_size,
-            c=[STATE_COLOR[s] for s in cities[city_idx].state_frames[0]],
-            edgecolors="#555555", linewidths=0.5, zorder=2
+            c=_face_colors_with_fade(city.state_frames[0],
+                                     recovered_ages_per_city[city_idx][0]),
+            edgecolors=edgecolors0, linewidths=linewidths0, zorder=2
         )
         scatters.append(scatter)
 
@@ -296,7 +419,7 @@ def animate_regional_states(regional_sim: RegionalSimulation,
         ax.axis("off")
         ax.set_title(f"City {city_label(city_idx)} (n={sizes[city_idx]})",
                      fontsize=11, weight="bold")
-        pad = 1.0
+        pad = 1.15
         ax.set_xlim(coords[:, 0].min() - pad, coords[:, 0].max() + pad)
         ax.set_ylim(coords[:, 1].min() - pad, coords[:, 1].max() + pad)
 
@@ -384,24 +507,46 @@ def animate_regional_states(regional_sim: RegionalSimulation,
             fig.add_artist(string)
             cross_city_artists.append(string)
 
+    transmission_artists: List[List] = [[] for _ in cities]
+
     def update(frame: int):
         """Recolour every marker to its state on day ``frame``."""
         for city_idx, city in enumerate(cities):
             if frame < len(city.state_frames):
                 states = city.state_frames[frame]
-                scatters[city_idx].set_color([STATE_COLOR[s] for s in states])
-                scatters[city_idx].set_edgecolors("#555555")
+                newly_infected = _newly_infected_mask(city.state_frames, frame)
+                traveling = None
+                if frame < len(city.travel_status_frames):
+                    away_ids = city.travel_status_frames[frame].keys()
+                    traveling = np.zeros(len(states), dtype=bool)
+                    for away_id in away_ids:
+                        traveling[away_id] = True
+                scatters[city_idx].set_facecolor(_face_colors_with_fade(
+                    states, recovered_ages_per_city[city_idx][frame]))
+                edgecolors, linewidths = _edge_styling(
+                    len(states), newly_infected, traveling)
+                scatters[city_idx].set_edgecolors(edgecolors)
+                scatters[city_idx].set_linewidths(linewidths)
+
+                while transmission_artists[city_idx]:
+                    transmission_artists[city_idx].pop().remove()
+                if frame < len(city.transmission_frames):
+                    transmission_artists[city_idx] = _draw_transmission_flashes(
+                        axes[city_idx], coords_per_city[city_idx],
+                        city.transmission_frames, frame)
 
                 if frame < len(city.history):
                     rec = city.history[frame]
+                    isolated_txt = "  [ISOLATED]" if city.isolated else ""
                     day_texts[city_idx].set_text(
-                        f"Day {rec.day}\n"
+                        f"Day {rec.day}{isolated_txt}\n"
                         f"S={rec.susceptible} E={rec.exposed}\n"
                         f"I={rec.infectious} R={rec.recovered}"
                     )
         _draw_travel(frame)
         _draw_cross_city_links(frame)
-        return scatters + day_texts + travel_artists + cross_city_artists
+        return (scatters + day_texts + travel_artists + cross_city_artists
+               + [a for artists in transmission_artists for a in artists])
 
     max_frames = max(len(city.state_frames) for city in cities)
     anim = FuncAnimation(
@@ -410,6 +555,7 @@ def animate_regional_states(regional_sim: RegionalSimulation,
     )
 
     fig.tight_layout(rect=(0, 0.08, 1, 0.95))
+    fig.subplots_adjust(wspace=0.35)
     if save_path:
         fps = max(1, round(1000 / interval_ms))
         anim.save(save_path, writer=PillowWriter(fps=fps))
@@ -485,12 +631,14 @@ def plot_regional_curves(regional_sim: RegionalSimulation,
 def _population_tile_groups(population: int, tile_fraction: float) -> List[np.ndarray]:
     """Partition a city's residents into stable, equally sized visual cohorts.
 
-    The simulation has no geographic locations, so tiles deliberately represent
-    population cohorts rather than physical neighbourhoods. Keeping membership
-    fixed means a changing tile reflects changing disease state, not a changing
-    sample of people.
+    The number of tiles scales with population size while preserving a
+    configurable approximate size per tile. A 5% tile fraction gives roughly 20
+    tiles for a city of 400 people, and fewer for smaller cities.
     """
-    tile_count = min(population, max(1, round(1 / tile_fraction)))
+    desired_tiles = max(1, int(round(1 / max(tile_fraction, 1e-6))))
+    tile_count = min(population, max(1, desired_tiles))
+    if population <= 4:
+        return [np.array([i], dtype=int) for i in range(population)]
     return list(np.array_split(np.arange(population), tile_count))
 
 
@@ -522,6 +670,10 @@ def animate_regional_heatmap(regional_sim: "RegionalSimulation",
             values[frame] = [infectious[group].mean() for group in groups]
         tile_fracs.append(values)
     vmax = max(0.05, max(float(values.max()) for values in tile_fracs))
+    try:
+        cmap = plt.get_cmap("YlOrRd")
+    except AttributeError:
+        cmap = plt.cm.get_cmap("YlOrRd")
 
     cols = int(np.ceil(np.sqrt(n)))
     rows = int(np.ceil(n / cols))
@@ -537,9 +689,9 @@ def animate_regional_heatmap(regional_sim: "RegionalSimulation",
         tile_rows = int(np.ceil(tile_count / tile_cols))
         coords = np.array([(i % tile_cols, -(i // tile_cols))
                            for i in range(tile_count)], dtype=float)
-        marker_size = max(90, min(780, 6500 / max(tile_cols, tile_rows) ** 2))
+        marker_size = max(120, min(860, 7000 / max(tile_cols, tile_rows) ** 2))
         scatter = ax.scatter(coords[:, 0], coords[:, 1], s=marker_size,
-                             marker="s", c=values[0], cmap="OrRd",
+                             marker="s", c=values[0], cmap=cmap,
                              vmin=0.0, vmax=vmax, edgecolors="white",
                              linewidths=1.2)
         scatters.append(scatter)
@@ -555,8 +707,10 @@ def animate_regional_heatmap(regional_sim: "RegionalSimulation",
                 color="#555555")
     for ax in flat_axes[n:]:
         ax.axis("off")
-    fig.colorbar(scatters[0], ax=flat_axes[:n].tolist(), fraction=0.035, pad=0.03,
-                 label="infectious share within tile")
+    cbar = fig.colorbar(scatters[0], ax=flat_axes[:n].tolist(), location="right",
+                        fraction=0.025, pad=0.03)
+    cbar.set_label("infectious share within tile", fontsize=9)
+    cbar.ax.set_title("0%  25%  50%  75%  100%", fontsize=8)
     fig.text(0.01, 0.01,
              "Tiles are fixed resident cohorts, not geographic neighbourhoods.",
              fontsize=8, color="#555555")
@@ -571,7 +725,7 @@ def animate_regional_heatmap(regional_sim: "RegionalSimulation",
 
     anim = FuncAnimation(fig, update, frames=num_frames,
                          interval=interval_ms, blit=False, repeat=False)
-    fig.tight_layout(rect=(0, 0.035, 1, 0.93))
+    fig.subplots_adjust(left=0.03, right=0.98, top=0.90, bottom=0.08)
     if save_path:
         anim.save(save_path, writer=PillowWriter(fps=max(1, round(1000 / interval_ms))))
         print(f"Saved regional heat map to {save_path}")

@@ -11,12 +11,12 @@ what makes a given :class:`~config.Config` perfectly reproducible.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 
 from config import Config
-from disease_model import State
+from disease_model import PersonSnapshot, State
 from engine import DiseaseEngine
 from interaction import (
     RandomNetworkContactModel,
@@ -81,12 +81,17 @@ class Simulation:
             incubation_days=config.incubation_days,
             infectious_days=config.infectious_days,
             rng=self.rng,
+            behavioral_response_factor=(
+                config.behavioral_response_factor
+                if config.behavioral_response_enabled else None),
         )
 
         # Seed patient zeros as EXPOSED and record the day-0 baseline.
         self.engine.seed_exposed(config.initial_infected)
         self.history: List[DailyRecord] = []
         self.state_frames: List[List[State]] = []
+        self.person_frames: List[List[PersonSnapshot]] = []
+        self.transmission_frames: List[List] = []
         self._record(new_exposed=config.initial_infected,
                      new_infectious=0, new_recovered=0)
 
@@ -135,6 +140,7 @@ class Simulation:
             new_exposed=delta["new_exposed"],
             new_infectious=delta["new_infectious"],
             new_recovered=delta["new_recovered"],
+            transmissions=delta.get("transmissions"),
         )
 
     def run(self, verbose: bool = False) -> List[DailyRecord]:
@@ -168,7 +174,8 @@ class Simulation:
     # Internal
     # ------------------------------------------------------------------
     def _record(self, new_exposed: int, new_infectious: int,
-                new_recovered: int) -> DailyRecord:
+                new_recovered: int, transmissions: Optional[List] = None
+                ) -> DailyRecord:
         """Capture the current engine state as a :class:`DailyRecord`.
 
         Also appends the per-individual state snapshot to ``state_frames``.
@@ -177,6 +184,9 @@ class Simulation:
             new_exposed: New exposures attributed to this day.
             new_infectious: New infectious conversions this day.
             new_recovered: New recoveries this day.
+            transmissions: This day's ``(source_id, target_id)`` exposure
+                pairs (from the engine's ``step()`` result), used by the
+                visualization's transmission-flash effect.
 
         Returns:
             The appended :class:`DailyRecord`.
@@ -194,4 +204,23 @@ class Simulation:
         )
         self.history.append(record)
         self.state_frames.append(self.engine.states())
+        self.transmission_frames.append(list(transmissions or []))
+        self.person_frames.append(self._snapshot_persons())
         return record
+
+    def _snapshot_persons(self) -> List[PersonSnapshot]:
+        """Build this day's :class:`PersonSnapshot` list for the node export."""
+        counts = self.engine.last_contact_counts
+        return [
+            PersonSnapshot(
+                id=ind.id,
+                state=ind.state,
+                days_in_state=ind.days_in_state,
+                infected_by=ind.infected_by,
+                infection_generation=ind.infection_generation,
+                infection_day=ind.infection_day,
+                recovery_day=ind.recovery_day,
+                contacts_today=counts.get(ind.id, self.engine.nominal_contacts(ind.id)),
+            )
+            for ind in self.engine.individuals
+        ]

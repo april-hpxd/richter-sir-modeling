@@ -26,8 +26,13 @@ from typing import List, Optional
 
 import json
 
+from analysis import InterventionSpec, analyze_network_importance, evaluate_interventions, print_decision_support_report
 from config import Config
-from experiments import print_experiment_report, run_experiment, run_sensitivity_analysis
+from experiments import (
+    print_experiment_report, run_experiment, run_sensitivity_analysis,
+    run_travel_rate_sweep, write_experiment_csv,
+)
+from node_export import export_node_level_csv, export_node_level_csv_single
 from regional_simulation import RegionalSimulation
 from simulation import Simulation
 from epidemic_stats import export_csv, summary
@@ -110,12 +115,40 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Per-eligible daily travel probability (used to "
                                "build the default uniform travel matrix).")
 
+    behavior = p.add_argument_group("behavioral response and isolation")
+    behavior.add_argument("--behavioral-response", action="store_true",
+                          help="Enable contact reduction while infectious "
+                               "(e.g. halve daily contacts once symptomatic).")
+    behavior.add_argument("--behavioral-response-factor", type=float,
+                          default=d.behavioral_response_factor,
+                          help="Fraction of normal contacts kept once "
+                               "infectious (0.5 = halved).")
+    behavior.add_argument("--isolation-enabled", action="store_true",
+                          help="Enable automatic city isolation once a "
+                               "city's infectious share crosses the threshold.")
+    behavior.add_argument("--isolation-threshold", type=float,
+                          default=d.isolation_infectious_threshold,
+                          help="Infectious fraction of a city's population "
+                               "that triggers isolation.")
+    behavior.add_argument("--isolation-travel-multiplier", type=float,
+                          default=d.isolation_travel_multiplier,
+                          help="Travel-matrix multiplier applied to an "
+                               "isolated city's row/column (0 = no travel).")
+    behavior.add_argument("--isolation-contact-multiplier", type=float,
+                          default=d.isolation_contact_multiplier,
+                          help="Extra in-city contact multiplier applied "
+                               "while isolated (on top of any behavioral "
+                               "response; 1.0 = no change).")
+
     exp = p.add_argument_group("experiments")
     exp.add_argument("--experiment", type=int, default=0, metavar="N",
                      help="Run the regional config N times over different seeds "
                           "and report mean/std (0 = single run).")
     exp.add_argument("--experiment-base-seed", type=int, default=0,
                      help="First seed used by --experiment.")
+    exp.add_argument("--experiment-csv", metavar="PATH",
+                     default="experiment_results.csv",
+                     help="Where to write every --experiment run as a CSV row.")
     exp.add_argument("--sensitivity-config", metavar="PATH", default=None,
                      help="Run a sensitivity sweep: a JSON file mapping Config "
                           "field names to a list of values to try, e.g. "
@@ -126,6 +159,21 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Independent seeds run per --sensitivity-config grid point.")
     exp.add_argument("--sensitivity-csv", metavar="PATH", default="sensitivity_results.csv",
                      help="Where to write every sensitivity-sweep run as a CSV row.")
+    exp.add_argument("--travel-rate-sweep", action="store_true",
+                     help="Compare a range of daily travel rates (arrival "
+                          "day, peak infections, attack rate, duration) and "
+                          "print/export a comparison table.")
+    exp.add_argument("--travel-rates", default="0,0.05,0.1,0.15,0.2",
+                     help="Comma-separated daily travel rates for "
+                          "--travel-rate-sweep.")
+    exp.add_argument("--travel-rate-sweep-runs", type=int, default=5,
+                     help="Independent seeds run per rate in --travel-rate-sweep.")
+    exp.add_argument("--travel-rate-sweep-csv", metavar="PATH",
+                     default="travel_rate_sweep.csv",
+                     help="Where to write every --travel-rate-sweep run as a CSV row.")
+    exp.add_argument("--validate", action="store_true",
+                     help="Run the validation suite and print a pass/fail "
+                          "report instead of a normal simulation.")
 
     out = p.add_argument_group("visualization and output")
     out.add_argument("--visualization-mode",
@@ -146,8 +194,16 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Save the state animation to a .gif file.")
     out.add_argument("--save-curves", metavar="PATH", default=None,
                      help="Save the SEIR curves to an image file (.png).")
+    out.add_argument("--decision-support", action="store_true",
+                     help="Run intervention evaluation and print a decision-support report.")
+    out.add_argument("--decision-support-runs", type=int, default=3,
+                     help="Number of repeated runs used for each intervention evaluation.")
     out.add_argument("--export-csv", metavar="PATH", default=None,
                      help="Export the day-by-day history to a CSV file.")
+    out.add_argument("--export-node-csv", metavar="PATH", default=None,
+                     help="Export a per-individual, per-day CSV (state, "
+                          "transmission source/generation, travel status, "
+                          "contacts) for later statistical analysis.")
     out.add_argument("--show", action="store_true",
                      help="Open interactive windows for the outputs.")
     out.add_argument("--quiet", action="store_true",
@@ -201,6 +257,12 @@ def config_from_args(args: argparse.Namespace) -> Config:
         daily_travel_rate=args.daily_travel_rate,
         visualization_mode=args.visualization_mode,
         heatmap_tile_fraction=args.heatmap_tile_percent / 100,
+        behavioral_response_enabled=args.behavioral_response,
+        behavioral_response_factor=args.behavioral_response_factor,
+        isolation_enabled=args.isolation_enabled,
+        isolation_infectious_threshold=args.isolation_threshold,
+        isolation_travel_multiplier=args.isolation_travel_multiplier,
+        isolation_contact_multiplier=args.isolation_contact_multiplier,
     )
 
 
@@ -251,6 +313,11 @@ def print_regional_report(regional_sim: RegionalSimulation,
     if summary_data["average_arrival_delay"] >= 0:
         print(f"  Avg arrival delay:     {summary_data['average_arrival_delay']:.1f} days")
     print(f"  Estimated R0:          {config.estimated_r0():.2f}")
+    print(f"  Effective R (mean):    {summary_data['mean_effective_r']:.2f}")
+    if any(summary_data["cities_isolated"]):
+        isolated_cities = [city_label(i) for i, isolated in
+                          enumerate(summary_data["cities_isolated"]) if isolated]
+        print(f"  Cities isolated:       {', '.join(isolated_cities)}")
     print()
 
     for city, city_stats in zip(regional_sim.cities, summary_data["city_summaries"]):
@@ -294,10 +361,17 @@ def main(argv: Optional[List[str]] = None) -> None:
             testing.
     """
     args = build_parser().parse_args(argv)
+
+    if args.validate:
+        run_validation_mode(args)
+        return
+
     config = config_from_args(args)
 
     if args.sensitivity_config:
         run_sensitivity_mode(config, args)
+    elif args.travel_rate_sweep:
+        run_travel_rate_sweep_mode(config, args)
     elif args.experiment > 0:
         run_experiment_mode(config, args)
     elif args.single_city:
@@ -326,6 +400,9 @@ def run_single_city(config: Config, args: argparse.Namespace) -> None:
         export_csv(simulation.history, args.export_csv)
         print(f"Exported history to {args.export_csv}")
 
+    if args.export_node_csv:
+        export_node_level_csv_single(simulation, args.export_node_csv)
+
     if args.save_curves or args.show:
         visualization.plot_curves(
             simulation.history, config,
@@ -335,7 +412,8 @@ def run_single_city(config: Config, args: argparse.Namespace) -> None:
             simulation.state_frames, simulation.history, config,
             layout=args.layout, save_path=args.save_gif,
             show=args.show, interval_ms=args.interval_ms,
-            graph=getattr(simulation.engine.contact_model, "graph", None))
+            graph=getattr(simulation.engine.contact_model, "graph", None),
+            transmission_frames=simulation.transmission_frames)
 
 
 def run_regional(config: Config, args: argparse.Namespace) -> None:
@@ -360,6 +438,9 @@ def run_regional(config: Config, args: argparse.Namespace) -> None:
     regional_sim.run(verbose=not args.quiet)
     print_regional_report(regional_sim, config)
 
+    if args.export_node_csv:
+        export_node_level_csv(regional_sim, args.export_node_csv)
+
     if args.save_curves or args.show:
         visualization.plot_regional_curves(
             regional_sim, save_path=args.save_curves, show=args.show)
@@ -368,6 +449,23 @@ def run_regional(config: Config, args: argparse.Namespace) -> None:
             regional_sim, mode=config.visualization_mode, layout=args.layout,
             save_path=args.save_gif, show=args.show, interval_ms=args.interval_ms,
             heatmap_tile_fraction=config.heatmap_tile_fraction)
+
+    if args.decision_support:
+        interventions = [
+            InterventionSpec(name="isolate_city_0", kind="isolate_city", city_ids=[0]),
+            InterventionSpec(name="isolate_city_1", kind="isolate_city", city_ids=[1]),
+            InterventionSpec(name="reduce_travel_globally", kind="reduce_travel_globally", factor=0.5),
+            InterventionSpec(name="remove_connection_0_1", kind="remove_connection", connection=(0, 1)),
+        ]
+        report = evaluate_interventions(
+            config,
+            interventions,
+            num_runs=args.decision_support_runs,
+            base_seed=config.random_seed,
+            verbose=not args.quiet,
+        )
+        report["network_analysis"] = analyze_network_importance(regional_sim)
+        print_decision_support_report(report, config)
 
 
 def run_experiment_mode(config: Config, args: argparse.Namespace) -> None:
@@ -383,6 +481,8 @@ def run_experiment_mode(config: Config, args: argparse.Namespace) -> None:
                             base_seed=args.experiment_base_seed,
                             verbose=not args.quiet)
     print_experiment_report(result, config)
+    if args.experiment_csv:
+        write_experiment_csv(result, args.experiment_csv)
 
 
 def run_sensitivity_mode(config: Config, args: argparse.Namespace) -> None:
@@ -408,6 +508,30 @@ def run_sensitivity_mode(config: Config, args: argparse.Namespace) -> None:
         runs_per_combo=args.sensitivity_runs_per_combo,
         csv_path=args.sensitivity_csv,
         verbose=not args.quiet)
+
+
+def run_travel_rate_sweep_mode(config: Config, args: argparse.Namespace) -> None:
+    """Compare a range of daily travel rates and write results to CSV.
+
+    Args:
+        config: The validated base configuration (each rate overrides
+            ``daily_travel_rate``).
+        args: The parsed command-line arguments.
+    """
+    rates = [float(r.strip()) for r in args.travel_rates.split(",") if r.strip()]
+    print(f"Running travel-rate sweep: {len(rates)} rates x "
+          f"{args.travel_rate_sweep_runs} seeds = "
+          f"{len(rates) * args.travel_rate_sweep_runs} simulations...")
+    run_travel_rate_sweep(
+        config, rates=rates, runs_per_combo=args.travel_rate_sweep_runs,
+        csv_path=args.travel_rate_sweep_csv, verbose=not args.quiet)
+
+
+def run_validation_mode(args: argparse.Namespace) -> None:
+    """Run the validation suite and print a pass/fail report."""
+    from validation import print_validation_report, run_all_validations
+    results = run_all_validations()
+    print_validation_report(results)
 
 
 if __name__ == "__main__":

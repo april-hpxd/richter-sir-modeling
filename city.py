@@ -21,7 +21,7 @@ import numpy as np
 from numpy.random import Generator
 
 from config import Config
-from disease_model import State
+from disease_model import PersonSnapshot, State
 from engine import DiseaseEngine
 from interaction import (
     ContactModel,
@@ -43,6 +43,10 @@ class DiseaseToken:
 
     state: State
     days_in_state: int
+    infected_by: Optional[str] = None
+    infection_generation: int = 0
+    infection_day: Optional[int] = None
+    recovery_day: Optional[int] = None
 
 
 @dataclass
@@ -77,6 +81,8 @@ class CityConfig:
     watts_strogatz_p: float
     random_degree_min: int
     random_degree_max: int
+    behavioral_response_factor: Optional[float] = None
+    isolation_contact_multiplier: float = 1.0
 
 
 class City:
@@ -116,15 +122,30 @@ class City:
             incubation_days=config.incubation_days,
             infectious_days=config.infectious_days,
             rng=self.rng,
+            id_prefix=f"{city_id}-",
+            behavioral_response_factor=config.behavioral_response_factor,
+            isolation_contact_multiplier=config.isolation_contact_multiplier,
         )
 
         self.history: List[DailyRecord] = []
         self.state_frames: List[List[State]] = []
+        # Per-day list of PersonSnapshot, one per resident; feeds the
+        # node-level CSV export (see node_export.py).
+        self.person_frames: List[List[PersonSnapshot]] = []
+        # Per-day sets of resident ids away travelling and their destination
+        # city id, populated by RegionalSimulation before record_day; used by
+        # the node export and the visualization's traveler highlight.
+        self.travel_status_frames: List[Dict[int, int]] = []
+        # Per-day list of (source_id, target_id) in-city transmissions,
+        # populated by record_day from the engine's step() result; used by
+        # the visualization's transmission-flash effect.
+        self.transmission_frames: List[List] = []
 
         # Number of infections this city *imported* via returning/visiting
         # travelers (as opposed to acquiring through its own internal network).
         # Maintained by :class:`RegionalSimulation`; read-only for statistics.
         self.imported_infections: int = 0
+        self.isolated: bool = False
 
     def _build_contact_model(self) -> ContactModel:
         """Construct the appropriate contact model for this city.
@@ -184,7 +205,9 @@ class City:
         return self.engine.step()
 
     def record_day(self, new_exposed: int, new_infectious: int,
-                   new_recovered: int) -> DailyRecord:
+                   new_recovered: int, transmissions: Optional[List] = None,
+                   traveler_locations: Optional[Dict[int, int]] = None
+                   ) -> DailyRecord:
         """Capture the current engine state as a :class:`DailyRecord`.
 
         Also appends the per-individual state snapshot to ``state_frames`` so
@@ -197,6 +220,12 @@ class City:
                 transmission plus infections imported via travel).
             new_infectious: Individuals who became infectious this day.
             new_recovered: Individuals who recovered this day.
+            transmissions: This day's in-city ``(source_id, target_id)``
+                exposure pairs (from the engine's ``step()`` result), used by
+                the visualization's transmission-flash effect.
+            traveler_locations: Map of this city's resident ids currently
+                travelling to their destination city id, used by the node
+                export and the visualization's traveler highlight.
 
         Returns:
             The appended :class:`DailyRecord`.
@@ -214,7 +243,34 @@ class City:
         )
         self.history.append(record)
         self.state_frames.append(self.engine.states())
+        self.transmission_frames.append(list(transmissions or []))
+        self.travel_status_frames.append(dict(traveler_locations or {}))
+        self.person_frames.append(self._snapshot_persons())
         return record
+
+    def _snapshot_persons(self) -> List[PersonSnapshot]:
+        """Build this day's :class:`PersonSnapshot` list for the node export."""
+        counts = self.engine.last_contact_counts
+        snapshots = []
+        for ind in self.engine.individuals:
+            if not ind.present:
+                # Away travelling: today's contacts happened in the
+                # destination city's network, not this one, so this city's
+                # nominal degree would be misleading here.
+                contacts_today = 0
+            else:
+                contacts_today = counts.get(ind.id, self.engine.nominal_contacts(ind.id))
+            snapshots.append(PersonSnapshot(
+                id=ind.id,
+                state=ind.state,
+                days_in_state=ind.days_in_state,
+                infected_by=ind.infected_by,
+                infection_generation=ind.infection_generation,
+                infection_day=ind.infection_day,
+                recovery_day=ind.recovery_day,
+                contacts_today=contacts_today,
+            ))
+        return snapshots
 
     def step(self) -> DailyRecord:
         """Advance and record one day, using only this city's own network.
@@ -231,6 +287,7 @@ class City:
             new_exposed=delta["new_exposed"],
             new_infectious=delta["new_infectious"],
             new_recovered=delta["new_recovered"],
+            transmissions=delta.get("transmissions"),
         )
 
     def run(self, simulation_days: int, verbose: bool = False) -> List[DailyRecord]:
@@ -312,7 +369,9 @@ class City:
         """
         return getattr(self.engine.contact_model, "graph", None)
 
-    def expose(self, individual_id: int) -> bool:
+    def expose(self, individual_id: int, infected_by: Optional[str] = None,
+              infection_generation: int = 0,
+              infection_day: Optional[int] = None) -> bool:
         """Expose a susceptible resident (``S -> E``), e.g. from a visitor.
 
         No-op (returns ``False``) if the individual is not susceptible, so a
@@ -320,6 +379,10 @@ class City:
 
         Args:
             individual_id: The resident to expose.
+            infected_by: Global id of the source (see
+                :attr:`disease_model.Individual.infected_by`).
+            infection_generation: The new transmission generation.
+            infection_day: The day of exposure.
 
         Returns:
             ``True`` if the individual was susceptible and is now exposed.
@@ -329,11 +392,19 @@ class City:
             return False
         individual.state = State.EXPOSED
         individual.days_in_state = 0
+        individual.infected_by = infected_by
+        individual.infection_generation = infection_generation
+        individual.infection_day = infection_day
         return True
 
-    # 
+    def set_isolated(self, isolated: bool) -> None:
+        """Toggle isolation-driven contact reduction for this city's engine."""
+        self.isolated = isolated
+        self.engine.set_isolated(isolated)
+
+    #
     # Travel support (relocating residents; hosting visitors)
-    # 
+    #
     def checkout(self, individual_id: int) -> DiseaseToken:
         """Mark a resident as away and return a token carrying their state.
 
@@ -343,23 +414,35 @@ class City:
         """
         ind = self.engine.individuals[individual_id]
         ind.present = False
-        return DiseaseToken(state=ind.state, days_in_state=ind.days_in_state)
+        return DiseaseToken(state=ind.state, days_in_state=ind.days_in_state,
+                            infected_by=ind.infected_by,
+                            infection_generation=ind.infection_generation,
+                            infection_day=ind.infection_day,
+                            recovery_day=ind.recovery_day)
 
     def sync_absent(self, individual_id: int, token: DiseaseToken) -> None:
         """Mirror an away resident's evolving state into the census (stays away)."""
         ind = self.engine.individuals[individual_id]
         ind.state = token.state
         ind.days_in_state = token.days_in_state
+        ind.infected_by = token.infected_by
+        ind.infection_generation = token.infection_generation
+        ind.infection_day = token.infection_day
+        ind.recovery_day = token.recovery_day
 
     def checkin(self, individual_id: int, token: DiseaseToken) -> None:
         """Return an away resident home, writing back their final state."""
         ind = self.engine.individuals[individual_id]
         ind.state = token.state
         ind.days_in_state = token.days_in_state
+        ind.infected_by = token.infected_by
+        ind.infection_generation = token.infection_generation
+        ind.infection_day = token.infection_day
+        ind.recovery_day = token.recovery_day
         ind.present = True
 
-    def host_visitor_day(self, token: DiseaseToken,
-                         rng: Generator) -> VisitDayResult:
+    def host_visitor_day(self, token: DiseaseToken, rng: Generator, day: int,
+                         visitor_global_id: str) -> VisitDayResult:
         """Run one day for a visitor in this city, then age their disease.
 
         Interaction is network-based (the visitor shares a random host's
@@ -368,11 +451,16 @@ class City:
         visitor may be infected by infectious residents. The visitor's own
         state then progresses one day. All disease timing and probabilities
         come from this city's engine -- the travel layer supplies only the
-        traveler and the RNG.
+        traveler and the RNG. Behavioral-response/isolation contact reduction
+        (see :meth:`engine.DiseaseEngine.subsample_contacts`) applies to an
+        infectious visitor exactly as it would to a resident of this city.
 
         Args:
             token: The visitor's disease token (mutated in place).
             rng: The generator to draw interaction outcomes from.
+            day: The current simulated day (for transmission-tracking stamps).
+            visitor_global_id: The visitor's global id (``"{home_city}-{id}"``),
+                stamped as ``infected_by`` on any resident they expose.
 
         Returns:
             A :class:`VisitDayResult` describing this day's transmissions.
@@ -385,10 +473,14 @@ class City:
         acquired_from: Optional[int] = None
 
         if token.state is State.INFECTIOUS:
+            contacts = self.engine.subsample_contacts(contacts, rng)
             for cid in contacts:
                 resident = self.engine.individuals[int(cid)]
                 if (resident.present and resident.state is State.SUSCEPTIBLE
-                        and rng.random() < p and self.expose(int(cid))):
+                        and rng.random() < p
+                        and self.expose(int(cid), infected_by=visitor_global_id,
+                                        infection_generation=token.infection_generation + 1,
+                                        infection_day=day)):
                     infected.append(int(cid))
         elif token.state is State.SUSCEPTIBLE:
             for cid in contacts:
@@ -397,12 +489,18 @@ class City:
                         and rng.random() < p):
                     token.state = State.EXPOSED
                     token.days_in_state = 0
+                    token.infected_by = f"{self.id}-{cid}"
+                    token.infection_generation = resident.infection_generation + 1
+                    token.infection_day = day
                     acquired_from = int(cid)
                     break
 
         # Age the visitor's disease one day (E -> I -> R), same timing as home
+        prev_state = token.state
         token.state, token.days_in_state = self.engine.advance_state(
             token.state, token.days_in_state)
+        if prev_state is State.INFECTIOUS and token.state is State.RECOVERED:
+            token.recovery_day = day
         return VisitDayResult(infected_resident_ids=infected,
                               acquired_from=acquired_from)
 

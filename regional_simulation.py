@@ -69,6 +69,10 @@ class RegionalSimulation:
                 watts_strogatz_p=config.watts_strogatz_p,
                 random_degree_min=config.random_degree_min,
                 random_degree_max=config.random_degree_max,
+                behavioral_response_factor=(
+                    config.behavioral_response_factor
+                    if config.behavioral_response_enabled else None),
+                isolation_contact_multiplier=config.isolation_contact_multiplier,
             )
             self.cities.append(City(city_id, city_config, city_rng))
 
@@ -111,16 +115,32 @@ class RegionalSimulation:
         # 2. Travel: start new trips and host everyone currently away.
         travel_result = self.travel.step(self._day)
         imported = travel_result.imported_today
+        locations = self.travel.current_locations()
 
         # 3. Record each city with internal + imported new exposures.
         regional_new = 0
-        for city, delta, imp in zip(self.cities, deltas, imported):
+        for city, delta, imp, location in zip(
+                self.cities, deltas, imported, locations):
             new_exposed = delta["new_exposed"] + imp
             regional_new += new_exposed
             city.record_day(
                 new_exposed=new_exposed,
                 new_infectious=delta["new_infectious"],
-                new_recovered=delta["new_recovered"])
+                new_recovered=delta["new_recovered"],
+                transmissions=delta.get("transmissions"),
+                traveler_locations=location)
+
+        # 4. Optional city isolation: toggle once a city's infectious share
+        # crosses the configured threshold (one-way -- stays isolated).
+        if self.config.isolation_enabled:
+            for city in self.cities:
+                if city.isolated:
+                    continue
+                last = city.history[-1]
+                prevalence = last.infectious / max(1, city.config.population_size)
+                if prevalence >= self.config.isolation_infectious_threshold:
+                    city.set_isolated(True)
+                    self.travel.set_city_isolated(city.id, True)
 
         stats = self._compute_regional_stats(
             num_travelers=travel_result.num_departed,
@@ -129,8 +149,12 @@ class RegionalSimulation:
         self.history.append(stats)
         return stats
 
+    def has_active_disease_or_travel(self) -> bool:
+        """Return ``True`` while any city still has active disease or a traveler remains in transit."""
+        return any(city.is_epidemic_active() for city in self.cities) or bool(self.travel.active)
+
     def run(self, verbose: bool = False) -> List[Dict]:
-        """Run to completion (no active disease anywhere, or day cap)."""
+        """Run to completion (no active disease or travelers left, or day cap)."""
         for _ in range(self.config.simulation_days):
             stats = self.step()
             if verbose:
@@ -143,7 +167,7 @@ class RegionalSimulation:
                     f"depart={stats['num_travelers']:3d} "
                     f"away={stats['num_active']:3d} "
                     f"imported={stats['new_imported']}")
-            if all(not city.is_epidemic_active() for city in self.cities):
+            if not self.has_active_disease_or_travel():
                 break
         return self.history
 
@@ -174,6 +198,7 @@ class RegionalSimulation:
             "new_imported": new_imported,
             "cumulative_imported": sum(c.imported_infections
                                        for c in self.cities),
+            "cities_isolated": [c.isolated for c in self.cities],
         }
 
     def exported_infections(self) -> List[int]:
@@ -215,6 +240,40 @@ class RegionalSimulation:
                 sources[tgt] = link.source_city_id
         return sources
 
+    def effective_reproduction_by_generation(self) -> Dict[int, float]:
+        """Estimate the effective reproduction number per transmission generation.
+
+        Every individual across every city carries an ``infection_generation``
+        (seeded cases are generation 0; each new case is one more than its
+        source's generation -- see :attr:`disease_model.Individual`). The
+        generation-based estimator ``Rt(g) = count(g + 1) / count(g)`` is the
+        mean number of secondary cases produced per case in generation ``g``.
+
+        Returns:
+            A dict mapping generation ``g`` to its ``Rt`` estimate, for every
+            generation that produced at least one further case (an empty
+            generation g+1 gives ``Rt(g) == 0.0``; a generation with no cases
+            at all is omitted).
+        """
+        from disease_model import State
+
+        counts: Dict[int, int] = {}
+        for city in self.cities:
+            for ind in city.engine.individuals:
+                if ind.state is State.SUSCEPTIBLE:
+                    continue
+                counts[ind.infection_generation] = (
+                    counts.get(ind.infection_generation, 0) + 1)
+
+        if not counts:
+            return {}
+        max_gen = max(counts)
+        return {
+            g: counts.get(g + 1, 0) / counts[g]
+            for g in range(max_gen)
+            if counts.get(g, 0) > 0
+        }
+
     def regional_summary(self) -> Dict:
         """Compute overall regional statistics for the completed run."""
         num_cities = len(self.cities)
@@ -231,6 +290,10 @@ class RegionalSimulation:
         arrivals = [d for i, d in enumerate(first_infection_days)
                     if i != 0 and d >= 0]
         avg_delay = float(np.mean(arrivals)) if arrivals else -1.0
+
+        rt_by_generation = self.effective_reproduction_by_generation()
+        mean_effective_r = (float(np.mean(list(rt_by_generation.values())))
+                           if rt_by_generation else 0.0)
 
         return {
             "num_cities": num_cities,
@@ -249,4 +312,7 @@ class RegionalSimulation:
             "num_travel_events": len(self.travel_events),
             "imported_infections": imported_infections,
             "city_summaries": city_summaries,
+            "effective_r_by_generation": rt_by_generation,
+            "mean_effective_r": mean_effective_r,
+            "cities_isolated": [c.isolated for c in self.cities],
         }
