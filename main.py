@@ -17,6 +17,11 @@ Two cities with travel::
 Three cities with heterogeneous populations::
 
     python main.py --regional --city-populations 500,200,1500 --travel-fraction 0.4 --daily-travel-rate 0.15 --visualization-mode heatmap --save-gif heatmap.gif --save-curves curves.png
+
+Mixed clustered/regular cities (City 0 and City 2 clustered, City 1 stays on
+the regular random-network model)::
+
+    python main.py --regional --city-populations 50,100,75 --clustered-cities 0,2 --num-clusters 5 --random-chance 0.1 --random-seed 42 --save-gif clustered.gif
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ from typing import List, Optional
 import json
 
 from analysis import InterventionSpec, analyze_network_importance, evaluate_interventions, print_decision_support_report
-from config import Config
+from config import CONTACT_MODELS, Config
 from experiments import (
     print_experiment_report, run_experiment, run_sensitivity_analysis,
     run_travel_rate_sweep, write_experiment_csv,
@@ -80,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Maximum number of days to simulate.")
     model.add_argument("--random-seed", type=int, default=d.random_seed,
                        help="Seed for all randomness (reproducibility).")
-    model.add_argument("--contact-model", choices=("random-network", "well-mixed", "watts-strogatz"),
+    model.add_argument("--contact-model", choices=CONTACT_MODELS,
                        default=d.contact_model,
                        help="Contact network model.")
     model.add_argument("--random-degree-min", type=int,
@@ -93,6 +98,14 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Neighbourhood size for Watts-Strogatz networks.")
     model.add_argument("--watts-strogatz-p", type=float, default=d.watts_strogatz_p,
                        help="Rewiring probability for Watts-Strogatz networks.")
+    model.add_argument("--num-clusters", type=int, default=d.num_clusters,
+                       help="Number of local clusters for the 'clustered' "
+                            "contact model (population is split as evenly "
+                            "as possible across clusters).")
+    model.add_argument("--random-chance", type=float, default=d.random_chance,
+                       help="For the 'clustered' contact model, the fraction "
+                            "(0-1) of a person's contact opportunities that "
+                            "may land outside their own cluster.")
 
     regional = p.add_argument_group("regional simulation parameters")
     regional.add_argument("--config", metavar="PATH", default=None,
@@ -108,6 +121,13 @@ def build_parser() -> argparse.ArgumentParser:
     regional.add_argument("--city-populations", default=None,
                           help="Comma-separated per-city sizes, e.g. '500,200,1500'. "
                                "Overrides --number-of-cities/--population-per-city.")
+    regional.add_argument("--clustered-cities", default=None,
+                          help="Comma-separated city indices that use the "
+                               "'clustered' contact model, e.g. '0,2' makes "
+                               "cities 0 and 2 clustered. Every other city "
+                               "keeps the regular --contact-model unchanged. "
+                               "Only clustered cities use --num-clusters/"
+                               "--random-chance.")
     regional.add_argument("--travel-fraction", type=float, default=d.travel_fraction,
                           help="Fraction of population eligible to travel (0-0.5).")
     regional.add_argument("--daily-travel-rate", type=float,
@@ -236,6 +256,11 @@ def config_from_args(args: argparse.Namespace) -> Config:
         city_populations = tuple(
             int(p.strip()) for p in args.city_populations.split(",") if p.strip())
 
+    clustered_cities = None
+    if args.clustered_cities:
+        clustered_cities = tuple(
+            int(c.strip()) for c in args.clustered_cities.split(",") if c.strip())
+
     return Config(
         population_size=args.population_size,
         daily_contacts=args.daily_contacts,
@@ -250,9 +275,12 @@ def config_from_args(args: argparse.Namespace) -> Config:
         random_degree_max=args.random_degree_max,
         watts_strogatz_k=args.watts_strogatz_k,
         watts_strogatz_p=args.watts_strogatz_p,
+        num_clusters=args.num_clusters,
+        random_chance=args.random_chance,
         number_of_cities=args.number_of_cities,
         population_per_city=args.population_per_city,
         city_populations=city_populations,
+        clustered_cities=clustered_cities,
         travel_fraction=args.travel_fraction,
         daily_travel_rate=args.daily_travel_rate,
         visualization_mode=args.visualization_mode,
@@ -389,6 +417,9 @@ def run_single_city(config: Config, args: argparse.Namespace) -> None:
     """
     print("Running single-city SEIR simulation...")
     print(f"  Contact model: {config.contact_model}")
+    if config.contact_model == "clustered":
+        print(f"  Num clusters: {config.num_clusters}   "
+              f"Random chance: {config.random_chance}")
     print(f"  Population: {config.population_size}")
     print(f"  Seed: {config.random_seed}")
 
@@ -413,7 +444,8 @@ def run_single_city(config: Config, args: argparse.Namespace) -> None:
             layout=args.layout, save_path=args.save_gif,
             show=args.show, interval_ms=args.interval_ms,
             graph=getattr(simulation.engine.contact_model, "graph", None),
-            transmission_frames=simulation.transmission_frames)
+            transmission_frames=simulation.transmission_frames,
+            cluster_of=getattr(simulation.engine.contact_model, "cluster_of", None))
 
 
 def run_regional(config: Config, args: argparse.Namespace) -> None:
@@ -425,8 +457,17 @@ def run_regional(config: Config, args: argparse.Namespace) -> None:
     """
     print("Running regional multi-city SEIR simulation...")
     sizes = config.city_sizes()
+    model_types = config.city_contact_model_types()
     print(f"  Cities: {config.num_cities()}   Populations: {sizes}")
-    print(f"  Contact model: {config.contact_model}")
+    if config.clustered_cities:
+        per_city = ", ".join(
+            f"{city_label(i)}={m}" for i, m in enumerate(model_types))
+        print(f"  Contact models: {per_city}")
+    else:
+        print(f"  Contact model: {config.contact_model}")
+    if "clustered" in model_types:
+        print(f"  Num clusters: {config.num_clusters}   "
+              f"Random chance: {config.random_chance}")
     print(f"  Travel fraction: {config.travel_fraction}")
     print(f"  Daily travel rate: {config.daily_travel_rate}")
     print(f"  Visualization mode: {config.visualization_mode}")

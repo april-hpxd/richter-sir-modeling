@@ -7,10 +7,6 @@ that moves people between them. It contains **no** disease logic and **no**
 travel logic of its own -- it only sequences the daily update and aggregates
 statistics.
 
-Everything is data-driven from :class:`~config.Config`: the number of cities,
-each city's population, and the (possibly asymmetric) travel matrix all come
-from configuration, so 2, 3, 5, 10, or 20 cities of differing sizes work with
-no code change.
 
 Daily update
 ------------
@@ -55,20 +51,24 @@ class RegionalSimulation:
         self.rng = np.random.default_rng(config.random_seed)
 
         sizes = config.city_sizes()
+        contact_model_types = config.city_contact_model_types()
         self.cities: List[City] = []
         for city_id, size in enumerate(sizes):
             city_rng = np.random.default_rng(int(self.rng.integers(0, 2**31)))
+            contact_model_type = contact_model_types[city_id]
             city_config = CityConfig(
                 population_size=size,
                 daily_contacts=min(config.daily_contacts, size - 1),
                 infection_probability=config.infection_probability,
                 incubation_days=config.incubation_days,
                 infectious_days=config.infectious_days,
-                contact_model_type=config.contact_model,
+                contact_model_type=contact_model_type,
                 watts_strogatz_k=config.watts_strogatz_k,
                 watts_strogatz_p=config.watts_strogatz_p,
                 random_degree_min=config.random_degree_min,
                 random_degree_max=config.random_degree_max,
+                num_clusters=min(config.num_clusters, size),
+                random_chance=config.random_chance,
                 behavioral_response_factor=(
                     config.behavioral_response_factor
                     if config.behavioral_response_enabled else None),

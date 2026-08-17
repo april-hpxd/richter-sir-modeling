@@ -19,6 +19,7 @@ from config import Config
 from disease_model import PersonSnapshot, State
 from engine import DiseaseEngine
 from interaction import (
+    ClusteredContactModel,
     RandomNetworkContactModel,
     WattsStrogatzContactModel,
     WellMixedContactModel,
@@ -123,6 +124,14 @@ class Simulation:
                 p=config.watts_strogatz_p,
                 rng=self.rng,
             )
+        elif config.contact_model == "clustered":
+            return ClusteredContactModel(
+                population_size=config.population_size,
+                num_clusters=config.num_clusters,
+                random_chance=config.random_chance,
+                daily_contacts=config.daily_contacts,
+                rng=self.rng,
+            )
         else:
             raise ValueError(f"Unknown contact model: {config.contact_model}")
 
@@ -211,6 +220,7 @@ class Simulation:
     def _snapshot_persons(self) -> List[PersonSnapshot]:
         """Build this day's :class:`PersonSnapshot` list for the node export."""
         counts = self.engine.last_contact_counts
+        cluster_of = getattr(self.engine.contact_model, "cluster_of", None)
         return [
             PersonSnapshot(
                 id=ind.id,
@@ -221,6 +231,7 @@ class Simulation:
                 infection_day=ind.infection_day,
                 recovery_day=ind.recovery_day,
                 contacts_today=counts.get(ind.id, self.engine.nominal_contacts(ind.id)),
+                cluster_id=(int(cluster_of[ind.id]) if cluster_of is not None else None),
             )
             for ind in self.engine.individuals
         ]

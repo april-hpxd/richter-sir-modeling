@@ -286,12 +286,15 @@ python main.py --regional --simulation-days 300
 python main.py --regional --random-seed 7 --save-gif seed7.gif
 ```
 
-#### `--contact-model {random-network,well-mixed,watts-strogatz}` *(default: `random-network`)*
+#### `--contact-model {random-network,well-mixed,watts-strogatz,clustered}` *(default: `random-network`)*
 - **What:** Chooses how people are connected within a city.
 - **Why:** `random-network` (default) is a realistic persistent social graph;
   `well-mixed` is the simplest textbook assumption (good for validation);
   `watts-strogatz` adds small-world clustering with occasional long-range
-  shortcuts (good for modeling tight communities with a few "bridge" people).
+  shortcuts (good for modeling tight communities with a few "bridge" people);
+  `clustered` splits the city into local neighbourhoods with dense in-group
+  contacts and only a trickle of cross-group contacts (see `--num-clusters`/
+  `--random-chance` below, and `--clustered-cities` for the regional case).
 - **How:** Set once at city construction (see `interaction.py`); the engine
   calls `contact_model.contacts(id, rng)` every day and never knows which
   concrete model it's talking to.
@@ -332,6 +335,38 @@ python main.py --single-city --contact-model watts-strogatz --watts-strogatz-k 1
 - **How:** Passed straight to `networkx.watts_strogatz_graph(n, k, p)`.
 ```bash
 python main.py --single-city --contact-model watts-strogatz --watts-strogatz-p 0.4
+```
+
+#### `--num-clusters N` *(default: `4`)*
+- **What:** Number of local clusters/neighbourhoods a `clustered` city's
+  population is split into.
+- **Why:** Fewer, larger clusters approximate a handful of big communities
+  (e.g. neighbourhoods); more, smaller clusters approximate tight households
+  or friend groups. Only affects cities actually using the `clustered` model.
+- **How:** People are shuffled (seeded) and split into `num_clusters` groups
+  as evenly as possible via `numpy.array_split` — this scales automatically
+  to each city's own population, so `--city-populations 50,500` with
+  `--num-clusters 5` gives ~10-person clusters in the first city and
+  ~100-person clusters in the second, without any extra configuration.
+```bash
+python main.py --single-city --population-size 200 --contact-model clustered --num-clusters 10
+```
+
+#### `--random-chance P` *(default: `0.1`, range `[0, 1]`)*
+- **What:** For a `clustered` city, the fraction of a person's persistent
+  contacts that get moved to someone *outside* their own cluster.
+- **Why:** This is social-contact structure, not infection or travel
+  probability — it controls how "leaky" the clusters are. `0.0` is fully
+  segregated clusters (disease can only escape via travel to another city);
+  `1.0` removes the cluster restriction almost entirely; `0.1`-`0.3` is a
+  realistic "mostly local, some outside mixing" neighbourhood.
+- **How:** After building each cluster's local ring of contacts, every edge
+  is rewired to a random member of a *different* cluster with probability
+  `random_chance` (mirrors `watts-strogatz`'s own rewiring, just constrained
+  to land outside the original cluster) -- see `ClusteredContactModel` in
+  `interaction.py`.
+```bash
+python main.py --single-city --contact-model clustered --num-clusters 5 --random-chance 0.3
 ```
 
 ### Regional Simulation Parameters
@@ -379,6 +414,28 @@ python main.py --regional --number-of-cities 4 --population-per-city 250
   `--population-per-city` entirely.
 ```bash
 python main.py --regional --city-populations 500,200,1500 --daily-travel-rate 0.1
+```
+
+#### `--clustered-cities "0,2"` *(default: none)*
+- **What:** Comma-separated city indices that use the `clustered` contact
+  model instead of the regular `--contact-model`. Cities *not* listed keep
+  using the regular network unchanged (`random-network` by default, or
+  whatever `--contact-model` is set to) — you never need to list "regular"
+  cities separately. Works for any number of cities and any mix of
+  populations; each clustered city sizes its own clusters from its own
+  population (see `--num-clusters`).
+- **Why:** This is the whole point of the feature: directly compare cities
+  with different social contact structure inside one regional run, e.g. "does
+  a clustered City 0 seed City 1 slower than a well-mixed City 0 would?"
+  without touching disease, travel, or any other parameter.
+- **How:** `Config.city_contact_model_types()` resolves one contact model per
+  city (`"clustered"` for indices in `clustered_cities`, else the global
+  `contact_model`); `RegionalSimulation` builds each city's `ContactModel`
+  from that per-city resolution. Invalid indices raise a clear `ValueError`.
+```bash
+# City 0 and City 2 clustered, City 1 stays on the regular random-network model
+python main.py --regional --city-populations 50,100,75 --clustered-cities 0,2 \
+    --num-clusters 5 --random-chance 0.1 --random-seed 42 --save-gif mixed.gif
 ```
 
 #### `--travel-fraction F` *(default: `0.5`, range `0`–`0.5`)*

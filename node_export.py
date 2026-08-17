@@ -21,6 +21,7 @@ NODE_CSV_FIELDS = [
     "day", "person_id", "home_city", "current_city", "state",
     "days_in_state", "traveling", "infected_by", "infection_generation",
     "infection_day", "recovery_day", "contacts_today", "newly_infected",
+    "cluster_id",
 ]
 
 
@@ -60,6 +61,7 @@ def export_node_level_csv(regional_sim: RegionalSimulation, path: str) -> None:
                         person.recovery_day if person.recovery_day is not None else "",
                         person.contacts_today,
                         _newly_infected(person.state, person.days_in_state),
+                        person.cluster_id if person.cluster_id is not None else "",
                     ])
     print(f"Wrote node-level export to {path}")
 
@@ -95,5 +97,6 @@ def export_node_level_csv_single(simulation: Simulation, path: str) -> None:
                     person.recovery_day if person.recovery_day is not None else "",
                     person.contacts_today,
                     _newly_infected(person.state, person.days_in_state),
+                    person.cluster_id if person.cluster_id is not None else "",
                 ])
     print(f"Wrote node-level export to {path}")

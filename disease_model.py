@@ -82,6 +82,10 @@ class PersonSnapshot:
     A lightweight, per-day copy of the fields the node-level CSV export
     (``node_export.py``) and the visualization need, kept separate from the
     live :class:`Individual` so recorded history doesn't alias mutable state.
+
+    ``cluster_id`` is the person's cluster membership under the ``clustered``
+    contact model (see ``interaction.ClusteredContactModel``), or ``None``
+    for any other contact model.
     """
 
     id: int
@@ -92,3 +96,4 @@ class PersonSnapshot:
     infection_day: Optional[int]
     recovery_day: Optional[int]
     contacts_today: int
+    cluster_id: Optional[int] = None

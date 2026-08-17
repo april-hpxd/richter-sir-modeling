@@ -6,6 +6,9 @@
   neighbours in a small-world network graph.
 * :class:`RandomNetworkContactModel` -- a seeded, persistent random graph in
   which each person has a random degree within configured bounds.
+* :class:`ClusteredContactModel` -- people are split into local clusters with
+  dense within-cluster contacts and a configurable trickle of cross-cluster
+  contacts.
 
 All randomness flows through a single NumPy :class:`~numpy.random.Generator`
 passed in by the caller, so contact draws stay part of the one reproducible
@@ -210,3 +213,111 @@ class RandomNetworkContactModel(ContactModel):
     def contacts(self, individual_id: int, rng: Generator) -> np.ndarray:
         """Return this person's persistent graph neighbours."""
         return np.fromiter(self.graph.neighbors(individual_id), dtype=np.int64)
+
+
+class ClusteredContactModel(ContactModel):
+    """A locally-clustered social graph: mostly within-neighbourhood contacts.
+
+    The population is split into ``num_clusters`` groups of roughly equal size
+    (each person's local "neighbourhood"). Each cluster gets its own small
+    persistent ring of contacts (built the same way as
+    :class:`WattsStrogatzContactModel`, restricted to that cluster's members),
+    so most of a person's daily contacts are with cluster-mates. A
+    ``random_chance`` fraction of edges are then rewired so one endpoint moves
+    to a random member of a *different* cluster -- exactly like Watts-Strogatz
+    rewiring, except the rewired endpoint is drawn from outside the original
+    cluster. This is what lets disease eventually escape a cluster: it never
+    changes *how likely* one contact is to transmit, only the social contact
+    structure the disease engine walks.
+
+    Attributes:
+        graph: The underlying networkx graph (node ids = individual ids).
+        cluster_of: Array mapping individual id -> cluster id.
+        clusters: Per-cluster list of member individual ids.
+    """
+
+    def __init__(self, population_size: int, num_clusters: int = 4,
+                 random_chance: float = 0.1, daily_contacts: int = 8,
+                 rng: Generator | None = None) -> None:
+        if rng is None:
+            rng = np.random.default_rng()
+        if population_size < 2:
+            raise ValueError("population_size must be >= 2.")
+        if num_clusters < 1:
+            raise ValueError("num_clusters must be >= 1.")
+        if num_clusters > population_size:
+            raise ValueError("num_clusters must not exceed population_size.")
+        if not 0.0 <= random_chance <= 1.0:
+            raise ValueError("random_chance must be in [0, 1].")
+
+        self.population_size = population_size
+        self.num_clusters = num_clusters
+        self.random_chance = random_chance
+
+        # Distribute people across clusters as evenly as possible: shuffle
+        # (so cluster membership is seeded, not id order) then split.
+        order = rng.permutation(population_size)
+        groups = np.array_split(order, num_clusters)
+        self.cluster_of = np.empty(population_size, dtype=np.int64)
+        self.clusters: list[list[int]] = []
+        for cluster_id, members in enumerate(groups):
+            self.cluster_of[members] = cluster_id
+            self.clusters.append(sorted(int(m) for m in members))
+
+        self.graph = nx.Graph()
+        self.graph.add_nodes_from(range(population_size))
+        for members in self.clusters:
+            self._connect_cluster(members, daily_contacts, rng)
+
+        self._rewire_cross_cluster(rng)
+
+    def _connect_cluster(self, members: list[int], daily_contacts: int,
+                         rng: Generator) -> None:
+        """Build a small ring of persistent contacts within one cluster."""
+        m = len(members)
+        if m < 2:
+            return
+        if m == 2:
+            self.graph.add_edge(members[0], members[1])
+            return
+        k = min(daily_contacts, m - 1)
+        if k % 2:
+            k -= 1
+        k = max(2, min(k, m - 1))
+        seed = int(rng.integers(0, 2**31))
+        local_ring = nx.watts_strogatz_graph(n=m, k=k, p=0.0, seed=seed)
+        mapping = {i: members[i] for i in range(m)}
+        self.graph.add_edges_from(
+            (mapping[u], mapping[v]) for u, v in local_ring.edges())
+
+    def _rewire_cross_cluster(self, rng: Generator) -> None:
+        """With probability ``random_chance`` per edge, move one endpoint to a
+        random member of a different cluster (skipped if that would create a
+        self-loop or duplicate edge, mirroring Watts-Strogatz rewiring)."""
+        if self.num_clusters < 2 or self.random_chance <= 0.0:
+            return
+        for u, v in list(self.graph.edges()):
+            if rng.random() >= self.random_chance:
+                continue
+            keep, drop = (u, v) if rng.random() < 0.5 else (v, u)
+            candidates = np.flatnonzero(self.cluster_of != self.cluster_of[keep])
+            if candidates.size == 0:
+                continue
+            new_partner = int(rng.choice(candidates))
+            if self.graph.has_edge(keep, new_partner):
+                continue
+            self.graph.remove_edge(u, v)
+            self.graph.add_edge(keep, new_partner)
+
+    def contacts(self, individual_id: int, rng: Generator) -> np.ndarray:
+        """Return this person's persistent graph neighbours."""
+        return np.fromiter(self.graph.neighbors(individual_id), dtype=np.int64)
+
+    def cross_cluster_edge_fraction(self) -> float:
+        """Return the fraction of edges connecting two different clusters."""
+        total = self.graph.number_of_edges()
+        if total == 0:
+            return 0.0
+        cross = sum(1 for u, v in self.graph.edges()
+                   if self.cluster_of[u] != self.cluster_of[v])
+        return cross / total

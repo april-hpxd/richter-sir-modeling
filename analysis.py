@@ -199,21 +199,33 @@ def analyze_network_importance(sim: RegionalSimulation) -> Dict[str, Any]:
         communities = list(nx.algorithms.community.greedy_modularity_communities(graph)) if graph.number_of_nodes() > 1 else [set(range(graph.number_of_nodes()))]
 
         summary = sim.city_summary(city.id)
-        city_metrics.append(
-            {
-                "city_id": city.id,
-                "population": int(summary["population"]),
-                "degree_centrality": float(np.mean(list(degree.values()))),
-                "betweenness_centrality": float(np.mean(list(betweenness.values()))),
-                "closeness_centrality": float(np.mean(list(closeness.values()))),
-                "community_count": len(communities),
-                "attack_rate": float(summary["attack_rate"]),
-                "imported_infections": float(summary["imported_infections"]),
-                "peak_infectious": float(summary["peak_infectious"]),
-                "first_infection_day": float(summary["first_infection_day"]),
-                "epidemic_duration_days": float(summary["epidemic_duration_days"]),
-            }
-        )
+        metrics = {
+            "city_id": city.id,
+            "population": int(summary["population"]),
+            "degree_centrality": float(np.mean(list(degree.values()))),
+            "betweenness_centrality": float(np.mean(list(betweenness.values()))),
+            "closeness_centrality": float(np.mean(list(closeness.values()))),
+            "community_count": len(communities),
+            "clustering_coefficient": float(nx.average_clustering(graph)),
+            "attack_rate": float(summary["attack_rate"]),
+            "imported_infections": float(summary["imported_infections"]),
+            "peak_infectious": float(summary["peak_infectious"]),
+            "first_infection_day": float(summary["first_infection_day"]),
+            "epidemic_duration_days": float(summary["epidemic_duration_days"]),
+        }
+
+        # Clustered-contact-model cities additionally report their explicit
+        # cluster structure (distinct from the generic community detection
+        # above, which infers communities from any graph).
+        cluster_of = getattr(city.engine.contact_model, "cluster_of", None)
+        if cluster_of is not None:
+            num_clusters = int(cluster_of.max()) + 1
+            metrics["num_clusters"] = num_clusters
+            metrics["avg_cluster_size"] = city.config.population_size / num_clusters
+            metrics["cross_cluster_edge_fraction"] = (
+                city.engine.contact_model.cross_cluster_edge_fraction())
+
+        city_metrics.append(metrics)
 
     attack_rates = np.array([m["attack_rate"] for m in city_metrics], dtype=float)
     degree_scores = np.array([m["degree_centrality"] for m in city_metrics], dtype=float)

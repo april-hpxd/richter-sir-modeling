@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
-CONTACT_MODELS = ("random-network", "well-mixed", "watts-strogatz")
+CONTACT_MODELS = ("random-network", "well-mixed", "watts-strogatz", "clustered")
 VISUALIZATION_MODES = ("auto", "network", "cluster", "heatmap", "pie")
 
 # Thresholds used by "auto" mode to pick a visualization automatically from
@@ -41,6 +41,17 @@ class Config:
         contact_model: One of :data:`CONTACT_MODELS`.
         random_degree_min/max: Inclusive degree bounds for ``random-network``.
         watts_strogatz_k/p: Mean degree and rewiring prob for ``watts-strogatz``.
+        num_clusters: Number of local clusters/neighbourhoods for the
+            ``clustered`` model (population split as evenly as possible).
+        random_chance: For ``clustered``, the fraction of a person's contact
+            opportunities that may land outside their own cluster (0 = fully
+            segregated clusters, 1 = unrestricted mixing across clusters).
+        clustered_cities: Optional city indices (into :meth:`city_sizes`) that
+            use the ``clustered`` model regardless of ``contact_model``. Every
+            other city keeps the single global ``contact_model`` (its
+            "regular" network) unchanged. ``None``/empty means no city is
+            clustered. Ignored in single-city mode (use ``contact_model``
+            directly there). See :meth:`city_contact_model_types`.
 
     Disease dynamics:
         infection_probability: Per-interaction transmission probability.
@@ -88,6 +99,8 @@ class Config:
     random_degree_max: int = 7
     watts_strogatz_k: int = 8
     watts_strogatz_p: float = 0.1
+    num_clusters: int = 4
+    random_chance: float = 0.1
 
     # --- Disease dynamics -------------------------------------------------
     infection_probability: float = 0.06
@@ -103,6 +116,7 @@ class Config:
     number_of_cities: int = 2
     population_per_city: int = 50
     city_populations: Optional[Tuple[int, ...]] = None
+    clustered_cities: Optional[Tuple[int, ...]] = None
     travel_matrix: Optional[Tuple[Tuple[float, ...], ...]] = None
     travel_fraction: float = 0.5
     daily_travel_rate: float = 0.1
@@ -131,6 +145,8 @@ class Config:
         # instance stays hashable and immutable.
         object.__setattr__(self, "city_populations",
                            _as_int_tuple(self.city_populations))
+        object.__setattr__(self, "clustered_cities",
+                           _as_int_tuple(self.clustered_cities))
         object.__setattr__(self, "travel_matrix",
                            _as_matrix(self.travel_matrix))
         object.__setattr__(self, "trip_duration_distribution",
@@ -151,6 +167,12 @@ class Config:
             raise ValueError("watts_strogatz_k must be >= 1.")
         if not 0.0 <= self.watts_strogatz_p <= 1.0:
             raise ValueError("watts_strogatz_p must be in [0, 1].")
+        if self.num_clusters < 1:
+            raise ValueError("num_clusters must be >= 1.")
+        if self.num_clusters > self.population_size:
+            raise ValueError("num_clusters must not exceed population_size.")
+        if not 0.0 <= self.random_chance <= 1.0:
+            raise ValueError("random_chance must be in [0, 1].")
         if not 0.0 <= self.infection_probability <= 1.0:
             raise ValueError("infection_probability must be in [0, 1].")
         if self.incubation_days < 1:
@@ -193,6 +215,14 @@ class Config:
             if len(self.city_populations) < 1:
                 raise ValueError("city_populations must be non-empty.")
 
+        if self.clustered_cities is not None:
+            num_cities = len(sizes)
+            for city_id in self.clustered_cities:
+                if not 0 <= city_id < num_cities:
+                    raise ValueError(
+                        f"clustered_cities index {city_id} is out of range "
+                        f"for {num_cities} cities (valid: 0..{num_cities - 1}).")
+
         if self.travel_matrix is not None:
             n = len(sizes)
             m = self.travel_matrix
@@ -233,6 +263,19 @@ class Config:
     def num_cities(self) -> int:
         """Return the resolved number of cities."""
         return len(self.city_sizes())
+
+    def city_contact_model_types(self) -> Tuple[str, ...]:
+        """Return each city's resolved contact model, index == city id.
+
+        A city listed in :attr:`clustered_cities` uses ``"clustered"``; every
+        other city keeps the single global :attr:`contact_model` (its
+        "regular" network, unchanged from before clustering existed).
+        """
+        clustered = set(self.clustered_cities or ())
+        return tuple(
+            "clustered" if city_id in clustered else self.contact_model
+            for city_id in range(self.num_cities())
+        )
 
     def travel_probability_matrix(self) -> np.ndarray:
         """Return the resolved ``N x N`` travel-probability matrix.

@@ -5,6 +5,11 @@ from regional_simulation import RegionalSimulation
 from travel import Traveler
 from validation import (
     check_city_counts,
+    check_clustered_cities_arbitrary_count_and_sizes,
+    check_clustered_cities_invalid_index_rejected,
+    check_clustered_contact_model_runs,
+    check_clustered_reproducible,
+    check_clustered_zero_random_chance_is_segregated,
     check_different_seed_varies,
     check_large_population,
     check_same_seed_reproducible,
@@ -46,6 +51,31 @@ def test_large_population():
 
 def test_city_counts():
     result = check_city_counts()
+    assert result.passed, result.detail
+
+
+def test_clustered_contact_model_runs():
+    result = check_clustered_contact_model_runs()
+    assert result.passed, result.detail
+
+
+def test_clustered_cities_arbitrary_count_and_sizes():
+    result = check_clustered_cities_arbitrary_count_and_sizes()
+    assert result.passed, result.detail
+
+
+def test_clustered_cities_invalid_index_rejected():
+    result = check_clustered_cities_invalid_index_rejected()
+    assert result.passed, result.detail
+
+
+def test_clustered_zero_random_chance_is_segregated():
+    result = check_clustered_zero_random_chance_is_segregated()
+    assert result.passed, result.detail
+
+
+def test_clustered_reproducible():
+    result = check_clustered_reproducible()
     assert result.passed, result.detail
 
 

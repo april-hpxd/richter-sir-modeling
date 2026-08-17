@@ -90,6 +90,48 @@ def circle_layout(n: int, radius: float = 1.0) -> List[Position]:
             for a in angles]
 
 
+def cluster_layout(n: int, cluster_of: np.ndarray) -> List[Position]:
+    """Arrange individuals so cluster-mates sit close together on-screen.
+
+    Clusters are placed on a coarse grid (their own local region of the
+    figure); within a cluster, members are packed on a small sub-grid around
+    that region's center. This makes the :class:`~interaction.ClusteredContactModel`
+    structure visually obvious -- dense local neighbourhoods with only a few
+    edges reaching across to other regions -- and scales automatically with
+    both population size and the number of clusters (no layout is hardcoded
+    to a particular cluster count).
+
+    Args:
+        n: Number of individuals.
+        cluster_of: Per-individual cluster id (from the contact model).
+
+    Returns:
+        A list of ``(x, y)`` positions, indexed by individual id.
+    """
+    cluster_ids = sorted(set(int(c) for c in cluster_of))
+    cols = max(1, int(np.ceil(np.sqrt(len(cluster_ids)))))
+    spacing = 3.5
+    positions: List[Optional[Position]] = [None] * n
+    for idx, cid in enumerate(cluster_ids):
+        row, col = divmod(idx, cols)
+        cx, cy = col * spacing, -row * spacing
+        members = [i for i in range(n) if int(cluster_of[i]) == cid]
+        member_cols = max(1, int(np.ceil(np.sqrt(len(members)))))
+        for j, node_id in enumerate(members):
+            mrow, mcol = divmod(j, member_cols)
+            positions[node_id] = (cx + mcol * 0.55, cy - mrow * 0.55)
+    return positions
+
+
+def _resolve_layout(n: int, layout: str,
+                    cluster_of: Optional[np.ndarray]) -> List[Position]:
+    """Pick node positions: cluster-aware when a cluster assignment exists,
+    otherwise the requested fixed grid/circle layout."""
+    if cluster_of is not None:
+        return cluster_layout(n, cluster_of)
+    return circle_layout(n) if layout == "circle" else grid_layout(n)
+
+
 def _legend_handles() -> List[Patch]:
     """Return legend patches for the S/E/I/R colour scheme."""
     return [Patch(color=STATE_COLOR[s], label=STATE_LABEL[s]) for s in State]
@@ -204,7 +246,8 @@ def animate_states(state_frames: List[List[State]], history: List[DailyRecord],
                    show: bool = False,
                    interval_ms: int = 400,
                    graph=None,
-                   transmission_frames: Optional[List[List]] = None
+                   transmission_frames: Optional[List[List]] = None,
+                   cluster_of: Optional[np.ndarray] = None,
                    ) -> FuncAnimation:
     """Animate per-individual state changes on a fixed layout.
 
@@ -227,14 +270,16 @@ def animate_states(state_frames: List[List[State]], history: List[DailyRecord],
         transmission_frames: Per-day ``(source_id, target_id)`` exposure pairs
             (from :attr:`~simulation.Simulation.transmission_frames`), used
             for the transmission flash. ``None`` disables the effect.
+        cluster_of: Per-individual cluster id from a ``clustered`` contact
+            model, or ``None``. When given, overrides ``layout`` with
+            :func:`cluster_layout` so clusters are visually obvious.
 
     Returns:
         The :class:`~matplotlib.animation.FuncAnimation`. Keep a reference to it
         alive until display/saving completes.
     """
     n = config.population_size
-    positions = (circle_layout(n) if layout == "circle"
-                 else grid_layout(n))
+    positions = _resolve_layout(n, layout, cluster_of)
     coords = np.array(positions)
     recovered_ages = _recovered_run_lengths(state_frames)
 
@@ -358,7 +403,9 @@ def animate_regional_states(regional_sim: RegionalSimulation,
 
     Args:
         regional_sim: The completed RegionalSimulation with multiple cities.
-        layout: ``"grid"`` (default) or ``"circle"`` positioning.
+        layout: ``"grid"`` (default) or ``"circle"`` positioning; a city
+            running the ``clustered`` contact model uses :func:`cluster_layout`
+            instead, regardless of this setting, so its clusters stay visible.
         save_path: If given, save the animation to this ``.gif`` path.
         show: If ``True``, display the animation window.
         interval_ms: Delay between frames in milliseconds.
@@ -378,9 +425,12 @@ def animate_regional_states(regional_sim: RegionalSimulation,
     for te in regional_sim.travel_events:
         travel_by_day[te.day][(te.home_city_id, te.destination_city_id)] += 1
 
+    cluster_of_per_city = [
+        getattr(city.engine.contact_model, "cluster_of", None) for city in cities
+    ]
     positions_per_city = [
-        (circle_layout(n) if layout == "circle" else grid_layout(n))
-        for n in sizes
+        _resolve_layout(n, layout, cluster_of)
+        for n, cluster_of in zip(sizes, cluster_of_per_city)
     ]
 
     fig, axes = plt.subplots(1, num_cities, figsize=(6*num_cities, 5))

@@ -14,6 +14,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
+import numpy as np
+
+from city import City, CityConfig
 from config import Config
 from regional_simulation import RegionalSimulation
 
@@ -133,6 +136,106 @@ def check_city_counts() -> ValidationResult:
     return ValidationResult("city counts (1, 2, 5, 10) run", True, "completed")
 
 
+def check_clustered_contact_model_runs() -> ValidationResult:
+    """The clustered contact model builds and runs for single and regional
+    configs, including a per-city override alongside another model."""
+    try:
+        single = Config(number_of_cities=1, population_per_city=50,
+                        contact_model="clustered", num_clusters=5,
+                        random_chance=0.1, simulation_days=30, random_seed=7)
+        _run(single)
+        mixed = Config(city_populations=(50, 50),
+                       clustered_cities=(0,),
+                       num_clusters=5, random_chance=0.1,
+                       simulation_days=30, random_seed=7)
+        mixed_sim = _run(mixed)
+        model_types = [
+            type(city.engine.contact_model).__name__ for city in mixed_sim.cities]
+        if model_types != ["ClusteredContactModel", "RandomNetworkContactModel"]:
+            raise AssertionError(
+                f"expected city 0 clustered / city 1 regular, got {model_types}")
+        return ValidationResult("clustered contact model runs", True, "completed")
+    except Exception as exc:  # noqa: BLE001
+        return ValidationResult("clustered contact model runs", False, repr(exc))
+
+
+def check_clustered_cities_arbitrary_count_and_sizes() -> ValidationResult:
+    """clustered_cities works for >2 cities with unequal populations, and
+    each clustered city's cluster sizes scale to its own population."""
+    try:
+        config = Config(city_populations=(50, 200, 75, 500, 150),
+                        clustered_cities=(0, 2, 4),
+                        num_clusters=5, random_chance=0.1,
+                        simulation_days=20, random_seed=13)
+        sim = _run(config)
+        expected_types = ["ClusteredContactModel", "RandomNetworkContactModel",
+                          "ClusteredContactModel", "RandomNetworkContactModel",
+                          "ClusteredContactModel"]
+        actual_types = [type(c.engine.contact_model).__name__ for c in sim.cities]
+        if actual_types != expected_types:
+            raise AssertionError(f"expected {expected_types}, got {actual_types}")
+        for city_id in (0, 2, 4):
+            model = sim.cities[city_id].engine.contact_model
+            sizes = sorted(len(c) for c in model.clusters)
+            if max(sizes) - min(sizes) > 1:
+                raise AssertionError(
+                    f"city {city_id} cluster sizes too uneven: {sizes}")
+        return ValidationResult(
+            "clustered_cities: arbitrary city count and unequal populations",
+            True, f"contact models = {actual_types}")
+    except Exception as exc:  # noqa: BLE001
+        return ValidationResult(
+            "clustered_cities: arbitrary city count and unequal populations",
+            False, repr(exc))
+
+
+def check_clustered_cities_invalid_index_rejected() -> ValidationResult:
+    """An out-of-range clustered_cities index raises a clear ValueError."""
+    try:
+        Config(city_populations=(50, 50), clustered_cities=(5,))
+        return ValidationResult(
+            "clustered_cities: invalid index is rejected", False,
+            "expected ValueError, none raised")
+    except ValueError as exc:
+        return ValidationResult(
+            "clustered_cities: invalid index is rejected", True, str(exc))
+
+
+def check_clustered_zero_random_chance_is_segregated() -> ValidationResult:
+    """With random_chance=0, no edge connects two different clusters."""
+    city_config = CityConfig(
+        population_size=60, daily_contacts=6, infection_probability=0.1,
+        incubation_days=2, infectious_days=5, contact_model_type="clustered",
+        watts_strogatz_k=8, watts_strogatz_p=0.1, random_degree_min=1,
+        random_degree_max=7, num_clusters=6, random_chance=0.0)
+    city = City(0, city_config, np.random.default_rng(8))
+    model = city.engine.contact_model
+    cross_edges = sum(1 for u, v in city.network.edges()
+                      if model.cluster_of[u] != model.cluster_of[v])
+    passed = cross_edges == 0
+    return ValidationResult(
+        "clustered model: random_chance=0 has no cross-cluster edges",
+        passed, f"cross_cluster_edges={cross_edges}")
+
+
+def check_clustered_reproducible() -> ValidationResult:
+    """The same seed reproduces the same cluster assignment and edges."""
+    city_config = CityConfig(
+        population_size=60, daily_contacts=6, infection_probability=0.1,
+        incubation_days=2, infectious_days=5, contact_model_type="clustered",
+        watts_strogatz_k=8, watts_strogatz_p=0.1, random_degree_min=1,
+        random_degree_max=7, num_clusters=6, random_chance=0.2)
+    city_a = City(0, city_config, np.random.default_rng(11))
+    city_b = City(0, city_config, np.random.default_rng(11))
+    model_a, model_b = city_a.engine.contact_model, city_b.engine.contact_model
+    passed = (list(model_a.cluster_of) == list(model_b.cluster_of)
+             and sorted(city_a.network.edges()) == sorted(city_b.network.edges()))
+    return ValidationResult(
+        "clustered model is reproducible for a given seed",
+        passed, "cluster assignment and edges matched" if passed
+        else "cluster assignment or edges diverged")
+
+
 def run_all_validations() -> List[ValidationResult]:
     """Run every validation check and return the results in a fixed order."""
     return [
@@ -143,6 +246,11 @@ def run_all_validations() -> List[ValidationResult]:
         check_small_population(),
         check_large_population(),
         check_city_counts(),
+        check_clustered_contact_model_runs(),
+        check_clustered_cities_arbitrary_count_and_sizes(),
+        check_clustered_cities_invalid_index_rejected(),
+        check_clustered_zero_random_chance_is_segregated(),
+        check_clustered_reproducible(),
     ]
 
 
