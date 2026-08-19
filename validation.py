@@ -136,6 +136,44 @@ def check_city_counts() -> ValidationResult:
     return ValidationResult("city counts (1, 2, 5, 10) run", True, "completed")
 
 
+def check_travel_is_single_contact_not_network_broadcast() -> ValidationResult:
+    """A visiting infectious traveler exposes at most one resident (the
+    random host), never that host's whole neighbourhood/cluster.
+
+    Regression guard: travel used to attach a visitor to a host's *entire*
+    persistent contact list (their neighbours in the graph), so one
+    infectious traveler could expose many residents in a single day -- a
+    second, network-wide transmission channel layered on top of the city's
+    own daily contacts. That made a city's internal dynamics diverge from an
+    identical standalone (non-regional) run purely because it had active
+    travelers. Travel must now be exactly one random inter-city link per
+    traveler per day, independent of the destination's network.
+    """
+    from city import DiseaseToken
+    from disease_model import State
+
+    city_config = CityConfig(
+        population_size=60, daily_contacts=6, infection_probability=1.0,
+        incubation_days=2, infectious_days=5, contact_model_type="clustered",
+        watts_strogatz_k=8, watts_strogatz_p=0.1, random_degree_min=1,
+        random_degree_max=7, num_clusters=6, random_chance=0.0)
+    city = City(0, city_config, np.random.default_rng(21))
+    rng = np.random.default_rng(99)
+    max_infected_per_visit = 0
+    for day in range(200):
+        # Fresh INFECTIOUS token every day (not aged/reused) so every call
+        # actually exercises the infectious-visitor branch.
+        token = DiseaseToken(state=State.INFECTIOUS, days_in_state=0)
+        result = city.host_visitor_day(token, rng, day, "visitor")
+        max_infected_per_visit = max(max_infected_per_visit,
+                                     len(result.infected_resident_ids))
+    passed = max_infected_per_visit <= 1
+    return ValidationResult(
+        "travel is a single inter-city contact, not a network broadcast",
+        passed, f"max residents exposed by one visitor in one day = "
+                f"{max_infected_per_visit} (must be <= 1)")
+
+
 def check_clustered_contact_model_runs() -> ValidationResult:
     """The clustered contact model builds and runs for single and regional
     configs, including a per-city override alongside another model."""
@@ -241,6 +279,7 @@ def run_all_validations() -> List[ValidationResult]:
     return [
         check_zero_infection_probability(),
         check_zero_travel(),
+        check_travel_is_single_contact_not_network_broadcast(),
         check_same_seed_reproducible(),
         check_different_seed_varies(),
         check_small_population(),

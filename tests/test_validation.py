@@ -14,6 +14,7 @@ from validation import (
     check_large_population,
     check_same_seed_reproducible,
     check_small_population,
+    check_travel_is_single_contact_not_network_broadcast,
     check_zero_infection_probability,
     check_zero_travel,
 )
@@ -26,6 +27,11 @@ def test_zero_infection_probability():
 
 def test_zero_travel():
     result = check_zero_travel()
+    assert result.passed, result.detail
+
+
+def test_travel_is_single_contact_not_network_broadcast():
+    result = check_travel_is_single_contact_not_network_broadcast()
     assert result.passed, result.detail
 
 

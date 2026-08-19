@@ -225,9 +225,10 @@ class DiseaseEngine:
         """Apply this engine's behavioral-response/isolation reduction to a
         pre-computed contact array.
 
-        Shared by :meth:`effective_contacts` (residents) and
-        :meth:`city.City.host_visitor_day` (an infectious visitor uses the
-        destination city's contact-reduction policy while physically there).
+        Used by :meth:`effective_contacts` for residents' in-city contacts.
+        Travel (:meth:`city.City.host_visitor_day`) does not use this: an
+        inter-city visit is already a single fixed contact, independent of
+        this city's network and its behavioral-response/isolation settings.
 
         Args:
             contacts: The full, un-reduced contact array.

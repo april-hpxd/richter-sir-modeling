@@ -17,7 +17,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-import numpy as np
 from numpy.random import Generator
 
 from config import Config
@@ -55,7 +54,10 @@ class VisitDayResult:
     """Outcome of one day a visitor spends in a host city.
 
     Attributes:
-        infected_resident_ids: Residents the (infectious) visitor exposed.
+        infected_resident_ids: Residents the (infectious) visitor exposed --
+            at most one (the single random host for the day; see
+            :meth:`City.host_visitor_day`), kept as a list for a stable
+            interface with the travel layer.
         acquired_from: Id of the infectious resident that exposed the visitor
             this day, or ``None`` if the visitor was not newly infected.
     """
@@ -354,25 +356,6 @@ class City:
         """
         return self.engine.individuals[individual_id].state
 
-    def contacts_of(self, host_id: int, rng: Generator) -> np.ndarray:
-        """Return the ids a visitor would mingle with around ``host_id``.
-
-        A traveler has no fixed node in this city, so they are attached to a
-        random resident "host" and interact with that host's contacts in this
-        city's own contact network (its graph neighbours for Watts-Strogatz).
-        This is what makes travel spread disease through the *destination's*
-        network rather than by artificial random mixing.
-
-        Args:
-            host_id: The resident whose local contacts the visitor shares.
-            rng: The shared random generator (used only by stochastic models
-                such as well-mixed; ignored by the static network).
-
-        Returns:
-            A 1-D array of resident ids the visitor interacts with.
-        """
-        return self.engine.contact_model.contacts(host_id, rng)
-
     @property
     def network(self):
         """The underlying contact graph, or ``None`` for the well-mixed model.
@@ -476,37 +459,32 @@ class City:
                 stamped as ``infected_by`` on any resident they expose.
 
         Returns:
-            A :class:`VisitDayResult` describing this day's transmissions.
+            A :class:`VisitDayResult` describing this day's transmission (at
+            most one exposure either way, since there is only one contact).
         """
         p = self.config.infection_probability
         host_id = int(rng.integers(0, self.config.population_size))
-        contacts = np.unique(np.append(self.contacts_of(host_id, rng), host_id))
+        host = self.engine.individuals[host_id]
 
         infected: List[int] = []
         acquired_from: Optional[int] = None
 
         if token.state is State.INFECTIOUS:
-            contacts = self.engine.subsample_contacts(contacts, rng)
-            for cid in contacts:
-                resident = self.engine.individuals[int(cid)]
-                if (resident.present and resident.state is State.SUSCEPTIBLE
-                        and rng.random() < p
-                        and self.expose(int(cid), infected_by=visitor_global_id,
-                                        infection_generation=token.infection_generation + 1,
-                                        infection_day=day)):
-                    infected.append(int(cid))
+            if (host.present and host.state is State.SUSCEPTIBLE
+                    and rng.random() < p
+                    and self.expose(host_id, infected_by=visitor_global_id,
+                                    infection_generation=token.infection_generation + 1,
+                                    infection_day=day)):
+                infected.append(host_id)
         elif token.state is State.SUSCEPTIBLE:
-            for cid in contacts:
-                resident = self.engine.individuals[int(cid)]
-                if (resident.present and resident.state is State.INFECTIOUS
-                        and rng.random() < p):
-                    token.state = State.EXPOSED
-                    token.days_in_state = 0
-                    token.infected_by = f"{self.id}-{cid}"
-                    token.infection_generation = resident.infection_generation + 1
-                    token.infection_day = day
-                    acquired_from = int(cid)
-                    break
+            if (host.present and host.state is State.INFECTIOUS
+                    and rng.random() < p):
+                token.state = State.EXPOSED
+                token.days_in_state = 0
+                token.infected_by = f"{self.id}-{host_id}"
+                token.infection_generation = host.infection_generation + 1
+                token.infection_day = day
+                acquired_from = host_id
 
         # Age the visitor's disease one day (E -> I -> R), same timing as home
         prev_state = token.state
