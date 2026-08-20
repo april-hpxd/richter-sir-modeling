@@ -360,8 +360,9 @@ class City:
     def network(self):
         """The underlying contact graph, or ``None`` for the well-mixed model.
 
-        Exposed read-only for the visualization; disease/travel logic goes
-        through :meth:`contacts_of` instead of touching the graph directly.
+        Exposed read-only for the visualization. Travel/visitor logic
+        (:meth:`host_visitor_day`) deliberately does *not* touch this graph --
+        see its docstring for why.
         """
         return getattr(self.engine.contact_model, "graph", None)
 
@@ -441,15 +442,31 @@ class City:
                          visitor_global_id: str) -> VisitDayResult:
         """Run one day for a visitor in this city, then age their disease.
 
-        Interaction is network-based (the visitor shares a random host's
-        contacts) and bidirectional, mirroring resident transmission: an
-        infectious visitor may expose susceptible residents, and a susceptible
-        visitor may be infected by infectious residents. The visitor's own
+        Deliberately kept independent of this city's persistent contact
+        network: the visitor meets exactly **one** random resident (the
+        "host") for the day, not the host's whole neighbour list. A visitor
+        is a one-day guest, not someone who instantly gains access to a
+        resident's entire social circle -- broadcasting to the host's full
+        network would inject a second, network-wide transmission channel on
+        top of the city's own daily contacts, inflating a city's effective
+        exposure whenever it has active travelers and making its *internal*
+        dynamics diverge from an identical standalone (non-regional) run.
+        Keeping inter-city contact to a single link means:
+
+        * A city's internal spread is driven **only** by its own network,
+          exactly as in a standalone run with the same population/network
+          parameters -- travel only adds imported *seed* cases, never extra
+          local contacts.
+        * Inter-city transmission is its own clearly separate channel: one
+          random link per traveler per day, independent of cluster
+          membership or network topology on either end.
+
+        Interaction is bidirectional, mirroring resident transmission: an
+        infectious visitor may expose the susceptible host, and a susceptible
+        visitor may be infected by an infectious host. The visitor's own
         state then progresses one day. All disease timing and probabilities
         come from this city's engine -- the travel layer supplies only the
-        traveler and the RNG. Behavioral-response/isolation contact reduction
-        (see :meth:`engine.DiseaseEngine.subsample_contacts`) applies to an
-        infectious visitor exactly as it would to a resident of this city.
+        traveler and the RNG.
 
         Args:
             token: The visitor's disease token (mutated in place).

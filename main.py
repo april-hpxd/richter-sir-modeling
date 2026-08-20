@@ -372,7 +372,15 @@ def print_regional_report(regional_sim: RegionalSimulation,
 
     print()
     print("  Travel statistics:")
-    print(f"    Total travel events (completed trips): {summary_data['num_travel_events']}")
+    mobility = summary_data["mobility_statistics"]
+    print(f"    Total travel events (departures):      {summary_data['num_travel_events']}")
+    print(f"    Completed trips:                       {mobility['completed_trips']}")
+    print(f"    Currently traveling:                   {mobility['currently_traveling']}")
+    print(f"    Person-days away:                      {mobility['person_days_away']}")
+    print(f"    Average trip duration:                 {mobility['average_trip_duration']:.2f} days")
+    print(f"    Departures by origin:                  {mobility['travelers_by_origin']}")
+    print(f"    Departures by destination:             {mobility['travelers_by_destination']}")
+    print(f"    Origin-destination counts:             {mobility['origin_destination_counts']}")
     print(f"    Imported infections:                   {summary_data['imported_infections']}")
     if summary_data["num_cities"] > 1:
         b_day = summary_data.get("city_b_first_infection_day", -1.0)

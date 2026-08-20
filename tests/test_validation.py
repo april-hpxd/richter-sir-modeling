@@ -14,6 +14,8 @@ from validation import (
     check_large_population,
     check_same_seed_reproducible,
     check_small_population,
+    check_small_population_travel_eligibility,
+    check_travel_statistics_accounting,
     check_travel_is_single_contact_not_network_broadcast,
     check_zero_infection_probability,
     check_zero_travel,
@@ -47,6 +49,16 @@ def test_different_seed_varies():
 
 def test_small_population():
     result = check_small_population()
+    assert result.passed, result.detail
+
+
+def test_small_population_travel_eligibility():
+    result = check_small_population_travel_eligibility()
+    assert result.passed, result.detail
+
+
+def test_travel_statistics_accounting():
+    result = check_travel_statistics_accounting()
     assert result.passed, result.detail
 
 

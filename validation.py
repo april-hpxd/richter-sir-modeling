@@ -110,6 +110,40 @@ def check_small_population() -> ValidationResult:
         return ValidationResult("small population (n=2) runs", False, repr(exc))
 
 
+def check_small_population_travel_eligibility() -> ValidationResult:
+    """A non-zero exact small-city fraction does not floor to zero."""
+    config = Config(city_populations=(10, 10), travel_fraction=0.1,
+                    daily_travel_rate=0.0, random_seed=41)
+    sim = RegionalSimulation(config)
+    sizes = [len(pool) for pool in sim.travel.eligible]
+    passed = sizes == [1, 1]
+    return ValidationResult(
+        "small-population travel eligibility", passed,
+        f"eligible residents by city={sizes} (expected [1, 1])")
+
+
+def check_travel_statistics_accounting() -> ValidationResult:
+    """Mobility statistics agree with the recorded daily departure counts."""
+    config = Config(city_populations=(50, 50), travel_fraction=0.5,
+                    daily_travel_rate=0.1, infection_probability=0.0,
+                    simulation_days=20, random_seed=42)
+    sim = RegionalSimulation(config)
+    # Deliberately step the requested number of days: a travel validation must
+    # not end early merely because the disease process has finished.
+    for _ in range(config.simulation_days):
+        sim.step()
+    mobility = sim.travel.mobility_statistics()
+    daily_total = sum(row["num_travelers"] for row in sim.history)
+    pair_total = sum(sum(row) for row in mobility["origin_destination_counts"])
+    passed = (mobility["total_departures"] == daily_total == pair_total
+              and sum(mobility["travelers_by_origin"]) == daily_total
+              and sum(mobility["travelers_by_destination"]) == daily_total)
+    return ValidationResult(
+        "travel statistics accounting", passed,
+        f"departures={mobility['total_departures']}, daily_sum={daily_total}, "
+        f"OD_sum={pair_total}, person_days={mobility['person_days_away']}")
+
+
 def check_large_population() -> ValidationResult:
     """A 2000-person city runs to completion without error."""
     try:
@@ -283,6 +317,8 @@ def run_all_validations() -> List[ValidationResult]:
         check_same_seed_reproducible(),
         check_different_seed_varies(),
         check_small_population(),
+        check_small_population_travel_eligibility(),
+        check_travel_statistics_accounting(),
         check_large_population(),
         check_city_counts(),
         check_clustered_contact_model_runs(),

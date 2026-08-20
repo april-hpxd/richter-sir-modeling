@@ -119,10 +119,17 @@ class TravelManager:
         self._durations, self._duration_probs = config.trip_durations()
 
         # Fixed eligible-commuter pool per city (sorted for deterministic order).
+        # Stochastic rounding preserves the requested expected fraction without
+        # systematically rounding a small non-zero population down to nobody.
         self.eligible: List[np.ndarray] = []
         for city in cities:
             size = city.config.population_size
-            pool_size = int(size * config.travel_fraction)
+            exact_pool_size = size * config.travel_fraction
+            pool_size = int(np.floor(exact_pool_size))
+            fractional_member_probability = exact_pool_size - pool_size
+            if (fractional_member_probability > 0
+                    and self.rng.random() < fractional_member_probability):
+                pool_size += 1
             if pool_size > 0:
                 pool = rng.choice(size, size=pool_size, replace=False)
             else:
@@ -133,6 +140,12 @@ class TravelManager:
         self._away: List[set] = [set() for _ in cities]
         self.travel_events: List[TravelEvent] = []
         self.intercity_transmissions: List[InterCityTransmission] = []
+        self.total_departures = 0
+        self.person_days_away = 0
+        self.departures_by_origin = np.zeros(len(cities), dtype=np.int64)
+        self.departures_by_destination = np.zeros(len(cities), dtype=np.int64)
+        self.origin_destination_counts = np.zeros(
+            (len(cities), len(cities)), dtype=np.int64)
 
     # 
     def step(self, day: int) -> TravelDayResult:
@@ -207,6 +220,10 @@ class TravelManager:
                 ))
                 away.add(resident_id)
                 departed += 1
+                self.total_departures += 1
+                self.departures_by_origin[home_id] += 1
+                self.departures_by_destination[dest_id] += 1
+                self.origin_destination_counts[home_id, dest_id] += 1
         return departed
 
     def _host_active_trips(self, day: int,
@@ -215,6 +232,7 @@ class TravelManager:
         returned = 0
         still_active: List[Traveler] = []
         for tr in self.active:
+            self.person_days_away += 1
             dest = self.cities[tr.current_city_id]
             visitor_global_id = f"{tr.home_city_id}-{tr.home_individual_id}"
             result = dest.host_visitor_day(tr.token, self.rng, day,
@@ -284,6 +302,29 @@ class TravelManager:
         for tr in self.active:
             locations[tr.home_city_id][tr.home_individual_id] = tr.current_city_id
         return locations
+
+    def mobility_statistics(self) -> Dict[str, object]:
+        """Return auditable aggregate mobility counts for this run.
+
+        ``total_departures`` counts every trip when it begins, so it remains
+        meaningful if a caller stops at the configured day cap while a trip is
+        still active. ``person_days_away`` counts actual destination-hosted
+        days, not calendar days between departure and return.
+        """
+        completed = len(self.travel_events)
+        durations = [event.day_returned - event.day_departed
+                     for event in self.travel_events]
+        return {
+            "total_departures": self.total_departures,
+            "completed_trips": completed,
+            "currently_traveling": len(self.active),
+            "person_days_away": self.person_days_away,
+            "average_trip_duration": (
+                float(np.mean(durations)) if durations else 0.0),
+            "travelers_by_origin": self.departures_by_origin.tolist(),
+            "travelers_by_destination": self.departures_by_destination.tolist(),
+            "origin_destination_counts": self.origin_destination_counts.tolist(),
+        }
 
     def set_city_isolated(self, city_id: int, isolated: bool) -> None:
         """Scale a city's travel row/column by the isolation multiplier.

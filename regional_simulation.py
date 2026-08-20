@@ -199,6 +199,8 @@ class RegionalSimulation:
             "cumulative_imported": sum(c.imported_infections
                                        for c in self.cities),
             "cities_isolated": [c.isolated for c in self.cities],
+            "cumulative_travel_events": self.travel.total_departures,
+            "person_days_away": self.travel.person_days_away,
         }
 
     def exported_infections(self) -> List[int]:
@@ -309,7 +311,10 @@ class RegionalSimulation:
             "cities_reached": sum(1 for d in first_infection_days if d >= 0),
             "daily_regional_infections": [h["regional_new_infections"]
                                           for h in self.history],
-            "num_travel_events": len(self.travel_events),
+            # A travel event is counted at departure. This avoids omitting a
+            # trip that is still active when a caller stops at the day cap.
+            "num_travel_events": self.travel.total_departures,
+            "mobility_statistics": self.travel.mobility_statistics(),
             "imported_infections": imported_infections,
             "city_summaries": city_summaries,
             "effective_r_by_generation": rt_by_generation,

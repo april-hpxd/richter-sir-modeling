@@ -444,9 +444,12 @@ python main.py --regional --city-populations 50,100,75 --clustered-cities 0,2 \
 - **Why:** Models the fact that not everyone travels — commuters/travelers
   are usually a subset of the population. Lower it to represent a more
   "stay-at-home" population.
-- **How:** A fixed pool of `round(population * F)` residents is chosen once
-  per city at the start of the run (`TravelManager.eligible`); only members
-  of this pool are ever considered for a trip.
+- **How:** A fixed pool is chosen once per city at the start of the run
+  (`TravelManager.eligible`); only members of this pool are ever considered
+  for a trip. Its size is `floor(population * F)`, with one additional member
+  selected with probability equal to the fractional remainder. Thus the
+  expected pool size is exactly `population * F`, without systematically
+  reducing a small non-zero fraction to zero.
 ```bash
 python main.py --regional --travel-fraction 0.2 --number-of-cities 3
 ```
