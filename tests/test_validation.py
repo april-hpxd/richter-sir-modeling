@@ -12,6 +12,7 @@ from validation import (
     check_clustered_zero_random_chance_is_segregated,
     check_different_seed_varies,
     check_large_population,
+    check_mixed_city_travel_transmission,
     check_same_seed_reproducible,
     check_small_population,
     check_small_population_travel_eligibility,
@@ -34,6 +35,11 @@ def test_zero_travel():
 
 def test_travel_is_single_contact_not_network_broadcast():
     result = check_travel_is_single_contact_not_network_broadcast()
+    assert result.passed, result.detail
+
+
+def test_mixed_city_travel_transmission():
+    result = check_mixed_city_travel_transmission()
     assert result.passed, result.detail
 
 

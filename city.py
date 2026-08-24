@@ -485,6 +485,7 @@ class City:
 
         infected: List[int] = []
         acquired_from: Optional[int] = None
+        newly_acquired = False
 
         if token.state is State.INFECTIOUS:
             if (host.present and host.state is State.SUSCEPTIBLE
@@ -502,13 +503,17 @@ class City:
                 token.infection_generation = host.infection_generation + 1
                 token.infection_day = day
                 acquired_from = host_id
+                newly_acquired = True
 
-        # Age the visitor's disease one day (E -> I -> R), same timing as home
-        prev_state = token.state
-        token.state, token.days_in_state = self.engine.advance_state(
-            token.state, token.days_in_state)
-        if prev_state is State.INFECTIOUS and token.state is State.RECOVERED:
-            token.recovery_day = day
+        # A newly exposed traveler starts incubating after today's contact,
+        # matching the home engine, which does not age new exposures until the
+        # next day.
+        if not newly_acquired:
+            prev_state = token.state
+            token.state, token.days_in_state = self.engine.advance_state(
+                token.state, token.days_in_state)
+            if prev_state is State.INFECTIOUS and token.state is State.RECOVERED:
+                token.recovery_day = day
         return VisitDayResult(infected_resident_ids=infected,
                               acquired_from=acquired_from)
 

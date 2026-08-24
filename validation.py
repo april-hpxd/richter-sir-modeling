@@ -205,7 +205,65 @@ def check_travel_is_single_contact_not_network_broadcast() -> ValidationResult:
     return ValidationResult(
         "travel is a single inter-city contact, not a network broadcast",
         passed, f"max residents exposed by one visitor in one day = "
-                f"{max_infected_per_visit} (must be <= 1)")
+        f"{max_infected_per_visit} (must be <= 1)")
+
+
+def check_mixed_city_travel_transmission() -> ValidationResult:
+    """An infectious visitor carries disease from a clustered city to a
+    regular city and the recipient is counted as an import.
+
+    This is deliberately deterministic (probability one, one injected trip),
+    so it guards the regional hand-off itself rather than relying on a random
+    outbreak to happen to cross a city boundary.
+    """
+    from disease_model import State
+    from travel import Traveler
+
+    config = Config(
+        city_populations=(20, 20),
+        clustered_cities=(0,),
+        num_clusters=4,
+        random_chance=0.1,
+        infection_probability=1.0,
+        initial_infected=1,
+        travel_fraction=0.0,
+        daily_travel_rate=0.0,
+        random_seed=23,
+    )
+    sim = RegionalSimulation(config)
+
+    # Inject one City A resident already abroad in regular City B.  Disabling
+    # scheduled travel above keeps this check focused on this one hand-off.
+    source = sim.cities[0].engine.individuals[0]
+    source.state = State.INFECTIOUS
+    source.days_in_state = 0
+    token = sim.cities[0].checkout(0)
+    sim.travel._away[0].add(0)
+    sim.travel.active.append(Traveler(
+        home_city_id=0,
+        home_individual_id=0,
+        current_city_id=1,
+        days_remaining=1,
+        token=token,
+        state_before=State.INFECTIOUS,
+        day_departed=0,
+    ))
+
+    sim.step()
+    city_b = sim.cities[1]
+    links = sim.intercity_transmissions
+    passed = (
+        city_b.imported_infections == 1
+        and city_b.history[-1].new_exposed == 1
+        and len(links) == 1
+        and links[0].source_city_id == 0
+        and links[0].target_city_id == 1
+    )
+    return ValidationResult(
+        "mixed clustered/regular travel transmission",
+        passed,
+        f"City B imports={city_b.imported_infections}, "
+        f"new_exposed={city_b.history[-1].new_exposed}, links={len(links)}")
 
 
 def check_clustered_contact_model_runs() -> ValidationResult:
@@ -314,6 +372,7 @@ def run_all_validations() -> List[ValidationResult]:
         check_zero_infection_probability(),
         check_zero_travel(),
         check_travel_is_single_contact_not_network_broadcast(),
+        check_mixed_city_travel_transmission(),
         check_same_seed_reproducible(),
         check_different_seed_varies(),
         check_small_population(),
