@@ -19,10 +19,7 @@ from config import Config
 from disease_model import PersonSnapshot, State
 from engine import DiseaseEngine
 from interaction import (
-    ClusteredContactModel,
-    RandomNetworkContactModel,
-    WattsStrogatzContactModel,
-    WellMixedContactModel,
+    build_contact_model,
 )
 
 
@@ -105,35 +102,12 @@ class Simulation:
         Returns:
             A ContactModel instance.
         """
-        if config.contact_model == "random-network":
-            return RandomNetworkContactModel(
-                population_size=config.population_size,
-                min_degree=config.random_degree_min,
-                max_degree=config.random_degree_max,
-                rng=self.rng,
-            )
-        if config.contact_model == "well-mixed":
-            return WellMixedContactModel(
-                population_size=config.population_size,
-                daily_contacts=config.daily_contacts,
-            )
-        elif config.contact_model == "watts-strogatz":
-            return WattsStrogatzContactModel(
-                population_size=config.population_size,
-                k=config.watts_strogatz_k,
-                p=config.watts_strogatz_p,
-                rng=self.rng,
-            )
-        elif config.contact_model == "clustered":
-            return ClusteredContactModel(
-                population_size=config.population_size,
-                num_clusters=config.num_clusters,
-                random_chance=config.random_chance,
-                daily_contacts=config.daily_contacts,
-                rng=self.rng,
-            )
-        else:
-            raise ValueError(f"Unknown contact model: {config.contact_model}")
+        return build_contact_model(
+            model_type=config.contact_model,
+            population_size=config.population_size,
+            config=config,
+            rng=self.rng,
+        )
 
     # ------------------------------------------------------------------
     # Driving the simulation
@@ -182,6 +156,30 @@ class Simulation:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+    def contact_structure_summary(self):
+        """Return contact-rate and locality statistics for this run."""
+        model = self.engine.contact_model
+        if hasattr(model, "mean_contact_stats"):
+            return model.mean_contact_stats()
+        from interaction import contact_structure_stats, persistent_contact_lists
+        graph = getattr(model, "graph", None)
+        if graph is None:
+            return {}
+        return contact_structure_stats(
+            persistent_contact_lists(graph, self.config.population_size),
+            getattr(model, "cluster_of", None), graph)
+
+    def network_report(self):
+        """One-off structural report (degree, clustering, path length,
+        connected components) for this run's current contact graph. See
+        :meth:`City.network_report` for the persistent-vs-daily-resampled
+        caveat. Returns an empty dict for models with no graph."""
+        from interaction import network_topology_report
+        graph = getattr(self.engine.contact_model, "graph", None)
+        if graph is None:
+            return {}
+        return network_topology_report(graph)
+
     def _record(self, new_exposed: int, new_infectious: int,
                 new_recovered: int, transmissions: Optional[List] = None
                 ) -> DailyRecord:

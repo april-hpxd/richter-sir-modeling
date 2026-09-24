@@ -25,6 +25,7 @@ from engine import DiseaseEngine
 from interaction import (
     ClusteredContactModel,
     ContactModel,
+    DailyRandomContactModel,
     RandomNetworkContactModel,
     WattsStrogatzContactModel,
     WellMixedContactModel,
@@ -86,6 +87,9 @@ class CityConfig:
     random_degree_max: int
     num_clusters: int = 4
     random_chance: float = 0.1
+    within_cluster_contact_probability: Optional[float] = None
+    daily_contacts_min: Optional[int] = None
+    daily_contacts_max: Optional[int] = None
     behavioral_response_factor: Optional[float] = None
     isolation_contact_multiplier: float = 1.0
 
@@ -178,12 +182,35 @@ class City:
                 p=self.config.watts_strogatz_p,
                 rng=self.rng,
             )
+        elif self.config.contact_model_type == "daily-random":
+            min_degree = (self.config.daily_contacts_min
+                          if self.config.daily_contacts_min is not None
+                          else self.config.random_degree_min)
+            max_degree = (self.config.daily_contacts_max
+                          if self.config.daily_contacts_max is not None
+                          else self.config.random_degree_max)
+            return DailyRandomContactModel(
+                population_size=self.config.population_size,
+                min_degree=min_degree,
+                max_degree=max_degree,
+                rng=self.rng,
+            )
         elif self.config.contact_model_type == "clustered":
+            min_degree = (self.config.daily_contacts_min
+                          if self.config.daily_contacts_min is not None
+                          else self.config.random_degree_min)
+            max_degree = (self.config.daily_contacts_max
+                          if self.config.daily_contacts_max is not None
+                          else self.config.random_degree_max)
             return ClusteredContactModel(
                 population_size=self.config.population_size,
                 num_clusters=self.config.num_clusters,
                 random_chance=self.config.random_chance,
                 daily_contacts=self.config.daily_contacts,
+                within_cluster_contact_probability=(
+                    self.config.within_cluster_contact_probability),
+                min_degree=min_degree,
+                max_degree=max_degree,
                 rng=self.rng,
             )
         else:
@@ -399,6 +426,37 @@ class City:
         self.isolated = isolated
         self.engine.set_isolated(isolated)
 
+    def contact_structure_summary(self) -> Dict[str, float]:
+        """Return contact-rate and locality statistics for this city."""
+        model = self.engine.contact_model
+        if hasattr(model, "mean_contact_stats"):
+            return model.mean_contact_stats()
+        from interaction import contact_structure_stats, persistent_contact_lists
+        graph = getattr(model, "graph", None)
+        if graph is None:
+            return {}
+        return contact_structure_stats(
+            persistent_contact_lists(graph, self.config.population_size),
+            getattr(model, "cluster_of", None), graph)
+
+    def network_report(self) -> Dict[str, object]:
+        """One-off structural report (degree, clustering, path length,
+        connected components) for this city's current contact graph.
+
+        For a persistent model (``random-network``, ``watts-strogatz``) this
+        describes the one fixed graph used every day. For a daily-resampled
+        model (``daily-random``, ``clustered``) it describes only the most
+        recently prepared day's snapshot graph -- a representative sample,
+        not an average over the run (see :meth:`contact_structure_summary`
+        for the day-averaged degree/clustering statistics instead). Returns
+        an empty dict for models with no graph (e.g. ``well-mixed``).
+        """
+        from interaction import network_topology_report
+        graph = getattr(self.engine.contact_model, "graph", None)
+        if graph is None:
+            return {}
+        return network_topology_report(graph)
+
     #
     # Travel support (relocating residents; hosting visitors)
     #
@@ -538,8 +596,10 @@ class City:
         Returns:
             Dict with keys: population, peak_infectious, peak_infectious_day,
             peak_exposed, peak_exposed_day, total_infected, attack_rate,
-            epidemic_duration_days, final_susceptible, final_recovered,
-            first_infection_day (or -1 if no infection).
+            epidemic_duration_days, duration_censored (True if the disease
+            was still active on the last recorded day, meaning duration is a
+            lower bound rather than the true extinction time), final_susceptible,
+            final_recovered, first_infection_day (or -1 if no infection).
         """
         if not self.history:
             return {
@@ -559,6 +619,7 @@ class City:
                 "day_outbreak_began": -1.0,
                 "day_outbreak_peaked": -1.0,
                 "imported_infections": float(self.imported_infections),
+                "duration_censored": False,
             }
 
         final = self.history[-1]
@@ -602,4 +663,10 @@ class City:
             "day_outbreak_began": float(first_infection_day),
             "day_outbreak_peaked": float(peak_inf.day),
             "imported_infections": float(self.imported_infections),
+            # True if E+I was still > 0 on the last recorded day: the run
+            # ended because it hit simulation_days, not because the
+            # epidemic went extinct, so epidemic_duration_days is a lower
+            # bound on the true (unobserved) duration, not the true value.
+            # See epidemic_stats.is_duration_censored for the same logic.
+            "duration_censored": bool((final.exposed + final.infectious) > 0),
         }

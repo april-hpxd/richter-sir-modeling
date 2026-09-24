@@ -20,7 +20,10 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
-CONTACT_MODELS = ("random-network", "well-mixed", "watts-strogatz", "clustered")
+CONTACT_MODELS = (
+    "random-network", "well-mixed", "watts-strogatz", "clustered",
+    "daily-random",
+)
 VISUALIZATION_MODES = ("auto", "network", "cluster", "heatmap", "pie")
 
 # Thresholds used by "auto" mode to pick a visualization automatically from
@@ -40,12 +43,21 @@ class Config:
         daily_contacts: Contacts per person per day (well-mixed model only).
         contact_model: One of :data:`CONTACT_MODELS`.
         random_degree_min/max: Inclusive degree bounds for ``random-network``.
+        daily_contacts_min/max: Inclusive daily contact-count bounds for
+            ``clustered`` and ``daily-random``. When unset, both models use
+            ``random_degree_min/max`` so clustered vs regular comparisons
+            hold the contact *rate* fixed.
         watts_strogatz_k/p: Mean degree and rewiring prob for ``watts-strogatz``.
         num_clusters: Number of local clusters/neighbourhoods for the
             ``clustered`` model (population split as evenly as possible).
-        random_chance: For ``clustered``, the fraction of a person's contact
-            opportunities that may land outside their own cluster (0 = fully
-            segregated clusters, 1 = unrestricted mixing across clusters).
+            ``--cluster-count`` is an alias for this field.
+        within_cluster_contact_probability: For ``clustered``, the probability
+            that any one daily contact is chosen from the person's own
+            cluster (the rest are chosen from outside). This is *not* the
+            fraction of the population that is a contact.
+        random_chance: Legacy name for ``1 - within_cluster_contact_probability``
+            (between-cluster chance per contact). Kept so older CLI/JSON
+            still works. If both are set they must agree.
         clustered_cities: Optional city indices (into :meth:`city_sizes`) that
             use the ``clustered`` model regardless of ``contact_model``. Every
             other city keeps the single global ``contact_model`` (its
@@ -97,10 +109,13 @@ class Config:
     contact_model: str = "random-network"
     random_degree_min: int = 1
     random_degree_max: int = 7
+    daily_contacts_min: Optional[int] = None
+    daily_contacts_max: Optional[int] = None
     watts_strogatz_k: int = 8
     watts_strogatz_p: float = 0.1
     num_clusters: int = 4
     random_chance: float = 0.1
+    within_cluster_contact_probability: Optional[float] = None
 
     # --- Disease dynamics -------------------------------------------------
     infection_probability: float = 0.06
@@ -173,6 +188,25 @@ class Config:
             raise ValueError("num_clusters must not exceed population_size.")
         if not 0.0 <= self.random_chance <= 1.0:
             raise ValueError("random_chance must be in [0, 1].")
+        if self.within_cluster_contact_probability is not None:
+            if not 0.0 <= self.within_cluster_contact_probability <= 1.0:
+                raise ValueError(
+                    "within_cluster_contact_probability must be in [0, 1].")
+            object.__setattr__(
+                self, "random_chance",
+                1.0 - self.within_cluster_contact_probability)
+        else:
+            object.__setattr__(
+                self, "within_cluster_contact_probability",
+                1.0 - self.random_chance)
+        if self.daily_contacts_min is not None and self.daily_contacts_min < 1:
+            raise ValueError("daily_contacts_min must be >= 1.")
+        if self.daily_contacts_max is not None:
+            lo = (self.daily_contacts_min if self.daily_contacts_min is not None
+                  else self.random_degree_min)
+            if self.daily_contacts_max < lo:
+                raise ValueError(
+                    "daily_contacts_max must be >= daily_contacts_min.")
         if not 0.0 <= self.infection_probability <= 1.0:
             raise ValueError("infection_probability must be in [0, 1].")
         if self.incubation_days < 1:
@@ -346,11 +380,29 @@ class Config:
         """Return a back-of-the-envelope basic reproduction number."""
         if self.contact_model == "watts-strogatz":
             mean_contacts = self.watts_strogatz_k
-        elif self.contact_model == "random-network":
-            mean_contacts = (self.random_degree_min + self.random_degree_max) / 2
+        elif self.contact_model in ("random-network", "clustered", "daily-random"):
+            lo, hi = self.contact_degree_bounds(self.population_size)
+            mean_contacts = (lo + hi) / 2
         else:
             mean_contacts = self.daily_contacts
         return self.infection_probability * mean_contacts * self.infectious_days
+
+    def contact_degree_bounds(self, population_size: int) -> Tuple[int, int]:
+        """Return ``(min, max)`` daily/persistent contacts for matched models.
+
+        ``clustered`` and ``daily-random`` use these bounds so that changing
+        only locality (within-cluster probability) does not also change how
+        many people each person meets. Defaults follow the random-network
+        degree range.
+        """
+        cap = max(1, population_size - 1)
+        lo = (self.daily_contacts_min if self.daily_contacts_min is not None
+              else self.random_degree_min)
+        hi = (self.daily_contacts_max if self.daily_contacts_max is not None
+              else self.random_degree_max)
+        lo = max(1, min(int(lo), cap))
+        hi = max(lo, min(int(hi), cap))
+        return lo, hi
 
 
 # ----------------------------------------------------------------------

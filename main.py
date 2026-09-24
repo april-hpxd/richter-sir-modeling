@@ -34,8 +34,9 @@ import json
 from analysis import InterventionSpec, analyze_network_importance, evaluate_interventions, print_decision_support_report
 from config import CONTACT_MODELS, Config
 from experiments import (
-    print_experiment_report, run_experiment, run_sensitivity_analysis,
-    run_travel_rate_sweep, write_experiment_csv,
+    print_experiment_report, run_experiment, run_scenario_comparison,
+    run_sensitivity_analysis, run_travel_rate_sweep, write_experiment_csv,
+    write_scenario_comparison_csv,
 )
 from node_export import export_node_level_csv, export_node_level_csv_single
 from regional_simulation import RegionalSimulation
@@ -94,11 +95,18 @@ def build_parser() -> argparse.ArgumentParser:
     model.add_argument("--random-degree-max", type=int,
                        default=d.random_degree_max,
                        help="Maximum persistent contacts per node in a random network.")
+    model.add_argument("--daily-contacts-min", type=int,
+                       default=d.daily_contacts_min,
+                       help="Minimum daily contacts for daily-random and clustered models.")
+    model.add_argument("--daily-contacts-max", type=int,
+                       default=d.daily_contacts_max,
+                       help="Maximum daily contacts for daily-random and clustered models.")
     model.add_argument("--watts-strogatz-k", type=int, default=d.watts_strogatz_k,
                        help="Neighbourhood size for Watts-Strogatz networks.")
     model.add_argument("--watts-strogatz-p", type=float, default=d.watts_strogatz_p,
                        help="Rewiring probability for Watts-Strogatz networks.")
-    model.add_argument("--num-clusters", type=int, default=d.num_clusters,
+    model.add_argument("--num-clusters", "--cluster-count", dest="num_clusters",
+                       type=int, default=d.num_clusters,
                        help="Number of local clusters for the 'clustered' "
                             "contact model (population is split as evenly "
                             "as possible across clusters).")
@@ -106,6 +114,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="For the 'clustered' contact model, the fraction "
                             "(0-1) of a person's contact opportunities that "
                             "may land outside their own cluster.")
+    model.add_argument("--within-cluster-contact-probability", type=float,
+                       default=d.within_cluster_contact_probability,
+                       help="Probability each clustered contact is selected from the person's own cluster.")
 
     regional = p.add_argument_group("regional simulation parameters")
     regional.add_argument("--config", metavar="PATH", default=None,
@@ -169,6 +180,26 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("--experiment-csv", metavar="PATH",
                      default="experiment_results.csv",
                      help="Where to write every --experiment run as a CSV row.")
+    exp.add_argument("--scenario-comparison", metavar="PATH", default=None,
+                     help="Run a controlled comparison of several named "
+                          "scenarios: a JSON file mapping a scenario label "
+                          "to a dict of Config field overrides, e.g. "
+                          '\'{"clustered": {"clustered_cities": [0], '
+                          '"contact_model": "daily-random"}, "random": '
+                          '{"contact_model": "daily-random"}}\'. Every '
+                          "scenario runs --scenario-comparison-runs replicates "
+                          "over the SAME seed set (starting at "
+                          "--scenario-comparison-base-seed), applied on top "
+                          "of --config/CLI as the shared base -- no code "
+                          "changes needed to add or change scenarios.")
+    exp.add_argument("--scenario-comparison-runs", type=int, default=100,
+                     help="Replicates per scenario in --scenario-comparison.")
+    exp.add_argument("--scenario-comparison-base-seed", type=int, default=1000,
+                     help="First shared seed for --scenario-comparison.")
+    exp.add_argument("--scenario-comparison-csv", metavar="PATH",
+                     default="scenario_comparison_results.csv",
+                     help="Where to write every --scenario-comparison run as "
+                          "a CSV row (one row per scenario x replicate).")
     exp.add_argument("--sensitivity-config", metavar="PATH", default=None,
                      help="Run a sensitivity sweep: a JSON file mapping Config "
                           "field names to a list of values to try, e.g. "
@@ -273,10 +304,14 @@ def config_from_args(args: argparse.Namespace) -> Config:
         contact_model=args.contact_model,
         random_degree_min=args.random_degree_min,
         random_degree_max=args.random_degree_max,
+        daily_contacts_min=args.daily_contacts_min,
+        daily_contacts_max=args.daily_contacts_max,
         watts_strogatz_k=args.watts_strogatz_k,
         watts_strogatz_p=args.watts_strogatz_p,
         num_clusters=args.num_clusters,
         random_chance=args.random_chance,
+        within_cluster_contact_probability=(
+            args.within_cluster_contact_probability),
         number_of_cities=args.number_of_cities,
         population_per_city=args.population_per_city,
         city_populations=city_populations,
@@ -406,6 +441,8 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if args.sensitivity_config:
         run_sensitivity_mode(config, args)
+    elif args.scenario_comparison:
+        run_scenario_comparison_mode(config, args)
     elif args.travel_rate_sweep:
         run_travel_rate_sweep_mode(config, args)
     elif args.experiment > 0:
@@ -532,6 +569,34 @@ def run_experiment_mode(config: Config, args: argparse.Namespace) -> None:
     print_experiment_report(result, config)
     if args.experiment_csv:
         write_experiment_csv(result, args.experiment_csv)
+
+
+def run_scenario_comparison_mode(config: Config, args: argparse.Namespace) -> None:
+    """Run a controlled multi-scenario comparison and write results to CSV.
+
+    Args:
+        config: The validated base configuration; each scenario's overrides
+            (loaded from ``--scenario-comparison``) are applied on top of it.
+        args: The parsed command-line arguments.
+    """
+    with open(args.scenario_comparison, "r", encoding="utf-8") as handle:
+        scenario_overrides = json.load(handle)
+    scenarios = {
+        name: config.with_overrides(**overrides)
+        for name, overrides in scenario_overrides.items()
+    }
+    num_runs = args.scenario_comparison_runs
+    base_seed = args.scenario_comparison_base_seed
+    print(f"Running scenario comparison: {list(scenarios)} "
+          f"({num_runs} runs each, seeds {base_seed}..{base_seed + num_runs - 1})...")
+    comparison = run_scenario_comparison(
+        scenarios, num_runs=num_runs, base_seed=base_seed,
+        verbose=not args.quiet)
+    for name, result in comparison["scenarios"].items():
+        print(f"\n--- scenario: {name} ---")
+        print_experiment_report(result, scenarios[name])
+    if args.scenario_comparison_csv:
+        write_scenario_comparison_csv(comparison, args.scenario_comparison_csv)
 
 
 def run_sensitivity_mode(config: Config, args: argparse.Namespace) -> None:

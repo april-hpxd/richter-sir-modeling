@@ -78,6 +78,7 @@ class DiseaseEngine:
         # Actual contact-array length drawn by each infectious individual on
         # the most recent step(); read by the node export for `contacts_today`.
         self.last_contact_counts: Dict[int, int] = {}
+        self.first_between_cluster_day: Optional[int] = None
 
     # 
     # Seeding
@@ -130,6 +131,7 @@ class DiseaseEngine:
             ``(source_id, target_id)`` pairs newly exposed today, for
             visualization and transmission tracking).
         """
+        self.contact_model.prepare_day(self._rng)
         newly_exposed = self._transmit()
         new_infectious, new_recovered = self._progress()
 
@@ -175,6 +177,7 @@ class DiseaseEngine:
         newly_exposed: List[Tuple[int, Optional[int]]] = []
         exposed_set = set()
         contact_counts: Dict[int, int] = {}
+        cluster_of = getattr(self.contact_model, "cluster_of", None)
 
         for src in infectious_ids:
             contacts = self.effective_contacts(src, self._rng)
@@ -186,7 +189,17 @@ class DiseaseEngine:
                     if self._rng.random() < self.infection_probability:
                         exposed_set.add(target.id)
                         newly_exposed.append((target.id, src))
-        self.last_contact_counts = contact_counts
+                        if (cluster_of is not None
+                                and self.first_between_cluster_day is None
+                                and int(cluster_of[src]) != int(cluster_of[target.id])):
+                            self.first_between_cluster_day = self.day + 1
+        stored = getattr(self.contact_model, "contact_lists", None)
+        if stored is not None:
+            self.last_contact_counts = {
+                i: len(partners) for i, partners in enumerate(stored)
+            }
+        else:
+            self.last_contact_counts = contact_counts
         return newly_exposed
 
     def nominal_contacts(self, individual_id: int) -> int:
@@ -199,6 +212,9 @@ class DiseaseEngine:
         """
         graph = getattr(self.contact_model, "graph", None)
         if graph is not None:
+            lists = getattr(self.contact_model, "contact_lists", None)
+            if lists is not None:
+                return len(lists[individual_id])
             return int(graph.degree(individual_id))
         return int(getattr(self.contact_model, "daily_contacts", 0))
 

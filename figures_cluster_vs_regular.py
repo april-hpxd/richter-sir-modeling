@@ -44,12 +44,25 @@ N_SEEDS = 30
 BASE_SEED = 1000
 SIM_DAYS = 120
 
-# Matched mean degree across models: random-network's default degree range
-# (1..7) averages 4, so daily_contacts=4 sets the clustered model's
-# intra-cluster ring degree to the same average -- this isolates "local
-# clustering vs random wiring" as the one varying factor, instead of
-# confounding it with "clustered people simply have more contacts."
+# Control model: "daily-random" (DailyRandomContactModel), NOT "random-network".
+#
+# random-network is a *persistent* graph -- the same neighbours every day --
+# while clustered is a *daily-resampled* edge set -- new partners drawn each
+# day, with a locality bias. Comparing clustered against random-network would
+# confound two things at once: (1) the presence of local clustering, and (2)
+# the underlying network *type* (persistent graph vs daily-resampled draws).
+# daily-random is deliberately built as clustered's structural twin: same
+# daily-resampled mechanism, same per-day degree distribution (draw_daily_degree
+# with the same min/max bounds), differing *only* in whether contacts are
+# biased toward a person's own cluster. See interaction.py's
+# DailyRandomContactModel docstring and config.py's contact_degree_bounds().
+#
+# DAILY_CONTACTS=4 matches the mean of random-network's default degree range
+# (1..7 -> mean 4) purely so figures from earlier runs of this script remain
+# visually comparable; it has no special role in the clustered/daily-random
+# comparison itself, since both models already share min/max degree bounds.
 DAILY_CONTACTS = 4
+CONTROL_MODEL = "daily-random"
 
 COLOR_CLUSTERED = "#e63946"   # matches STATE_COLOR[INFECTIOUS] in visualization.py
 COLOR_REGULAR = "#264653"
@@ -89,7 +102,7 @@ def run_within_city_study():
     attack_rates = {"clustered": [], "regular": []}
 
     for label, contact_model in (("clustered", "clustered"),
-                                 ("regular", "random-network")):
+                                 ("regular", CONTROL_MODEL)):
         for i in range(N_SEEDS):
             seed = BASE_SEED + i
             config = Config(
@@ -142,7 +155,7 @@ def plot_within_city_curves(curves) -> None:
     fig, ax = plt.subplots(figsize=(9, 5.5))
     days = np.arange(SIM_DAYS + 1)
     for label, color, display in (("clustered", COLOR_CLUSTERED, "Clustered"),
-                                  ("regular", COLOR_REGULAR, "Regular (random-network)")):
+                                  ("regular", COLOR_REGULAR, "Regular (daily-random control)")):
         stack = np.array(curves[label])
         mean = stack.mean(axis=0)
         std = stack.std(axis=0)
@@ -209,6 +222,7 @@ def run_regional_study():
             seed = BASE_SEED + i
             config = Config(
                 city_populations=(50, 50), clustered_cities=clustered_cities,
+                contact_model=CONTROL_MODEL,
                 daily_contacts=DAILY_CONTACTS,
                 num_clusters=5, random_chance=0.1,
                 travel_fraction=0.3, daily_travel_rate=0.1,

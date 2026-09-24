@@ -30,6 +30,30 @@ def epidemic_duration(history: List[DailyRecord]) -> int:
     return max(active_days) if active_days else 0
 
 
+def is_duration_censored(history: List[DailyRecord]) -> bool:
+    """Whether the epidemic was still active on the last recorded day.
+
+    ``epidemic_duration`` is "the last day the disease was active" -- but if
+    the run stopped because it hit ``simulation_days`` while E+I was still
+    > 0 (rather than because the disease went extinct), that duration is a
+    lower bound on the true, unobserved extinction time, not the true value.
+    This flag makes that distinction explicit instead of silently treating a
+    horizon cutoff as the real epidemic end (see CHANGELOG_RESEARCH.md).
+
+    Args:
+        history: The recorded simulation history.
+
+    Returns:
+        ``True`` if the last recorded day still had E + I > 0 (duration is
+        censored/a lower bound), ``False`` if the disease had already gone
+        extinct (duration is the true value), or if there is no history.
+    """
+    if not history:
+        return False
+    final = history[-1]
+    return (final.exposed + final.infectious) > 0
+
+
 def peak(history: List[DailyRecord], attr: str) -> DailyRecord:
     """Return the :class:`DailyRecord` maximising the given count attribute.
 
@@ -74,6 +98,7 @@ def summary(history: List[DailyRecord]) -> Dict[str, float]:
         "total_infected": float(total_infected),
         "attack_rate": attack_rate,
         "epidemic_duration_days": float(epidemic_duration(history)),
+        "duration_censored": is_duration_censored(history),
         "final_susceptible": float(final.susceptible),
         "final_recovered": float(final.recovered),
     }

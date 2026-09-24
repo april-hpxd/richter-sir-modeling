@@ -69,6 +69,10 @@ class RegionalSimulation:
                 random_degree_max=config.random_degree_max,
                 num_clusters=min(config.num_clusters, size),
                 random_chance=config.random_chance,
+                within_cluster_contact_probability=(
+                    config.within_cluster_contact_probability),
+                daily_contacts_min=config.contact_degree_bounds(size)[0],
+                daily_contacts_max=config.contact_degree_bounds(size)[1],
                 behavioral_response_factor=(
                     config.behavioral_response_factor
                     if config.behavioral_response_enabled else None),
@@ -317,7 +321,17 @@ class RegionalSimulation:
             "mobility_statistics": self.travel.mobility_statistics(),
             "imported_infections": imported_infections,
             "city_summaries": city_summaries,
+            "contact_statistics": [
+                city.contact_structure_summary() for city in self.cities
+            ],
             "effective_r_by_generation": rt_by_generation,
             "mean_effective_r": mean_effective_r,
             "cities_isolated": [c.isolated for c in self.cities],
+            "cities_duration_censored": [s["duration_censored"] for s in city_summaries],
+            # True if ANY city's disease was still active on the last recorded
+            # day -- the regional run's duration figures are then a lower
+            # bound, not the true (unobserved) extinction time.
+            "regional_duration_censored": any(
+                s["duration_censored"] for s in city_summaries),
+            "network_reports": [city.network_report() for city in self.cities],
         }
