@@ -25,6 +25,7 @@ CONTACT_MODELS = (
     "daily-random",
 )
 VISUALIZATION_MODES = ("auto", "network", "cluster", "heatmap", "pie")
+VACCINATION_STRATEGIES = ("random",)
 
 # Thresholds used by "auto" mode to pick a visualization automatically from
 # the largest city's population: <= NETWORK_MAX_POPULATION individual nodes,
@@ -147,6 +148,15 @@ class Config:
     isolation_travel_multiplier: float = 0.0
     isolation_contact_multiplier: float = 1.0
 
+    # --- Vaccination intervention (pre-outbreak, 100% effective) -----------
+    # Disabled by default (``vaccination_rate == 0.0``): every existing
+    # no-vaccination run/experiment/CLI invocation is unaffected. Expressed
+    # as a rate (not a raw count) so the same Config scales correctly across
+    # cities of different sizes in a regional run -- see
+    # ``resolved_vaccination_count()``.
+    vaccination_rate: float = 0.0
+    vaccination_strategy: str = "random"
+
     # --- Output -----------------------------------------------------------
     visualization_mode: str = "auto"
     heatmap_tile_fraction: float = 0.05
@@ -236,6 +246,11 @@ class Config:
             raise ValueError("isolation_travel_multiplier must be in [0, 1].")
         if not 0.0 <= self.isolation_contact_multiplier <= 1.0:
             raise ValueError("isolation_contact_multiplier must be in [0, 1].")
+        if not 0.0 <= self.vaccination_rate <= 1.0:
+            raise ValueError("vaccination_rate must be in [0, 1].")
+        if self.vaccination_strategy not in VACCINATION_STRATEGIES:
+            raise ValueError(
+                f"vaccination_strategy must be one of {VACCINATION_STRATEGIES}.")
 
         # Resolved regional structure.
         sizes = self.city_sizes()
@@ -403,6 +418,15 @@ class Config:
         lo = max(1, min(int(lo), cap))
         hi = max(lo, min(int(hi), cap))
         return lo, hi
+
+    def resolved_vaccination_count(self, population_size: int) -> int:
+        """Return how many individuals of a city this size should be
+        vaccinated pre-outbreak, given :attr:`vaccination_rate`.
+
+        ``0`` (the default, ``vaccination_rate == 0.0``) means vaccination is
+        disabled for that population.
+        """
+        return int(round(self.vaccination_rate * population_size))
 
 
 # ----------------------------------------------------------------------

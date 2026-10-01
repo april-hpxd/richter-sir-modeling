@@ -5,6 +5,11 @@ SEIR compartments
 * ``E`` Exposed      -- infected and incubating, but **not yet infectious**.
 * ``I`` Infectious   -- can transmit to susceptible contacts.
 * ``R`` Recovered    -- permanently immune; cannot infect or be infected.
+* ``V`` Vaccinated   -- permanently immune from before the outbreak began;
+  see ``vaccination.py``. Reachable only from ``S`` (``S -> V``), and the
+  engine never transitions a ``V`` individual anywhere else: no ``V -> I``,
+  no ``V -> R``. Distinct from ``R`` so vaccinated-before-ever-infected
+  individuals stay distinguishable in statistics and visualization.
 
 """
 
@@ -27,6 +32,7 @@ class State(enum.Enum):
     EXPOSED = "E"
     INFECTIOUS = "I"
     RECOVERED = "R"
+    VACCINATED = "V"
 
 
 @dataclass

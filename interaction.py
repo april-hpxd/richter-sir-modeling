@@ -187,39 +187,26 @@ def contact_structure_stats(
 def network_topology_report(
     graph: nx.Graph, path_length_node_cap: int = 500,
 ) -> Dict[str, object]:
-    """One-off structural report for a contact graph.
-
-    Unlike :func:`contact_structure_stats` (designed to be called once per
-    simulated day, then averaged over many days), this is meant to be called
-    once per network -- e.g. at experiment setup -- to confirm the network
-    actually has the structural properties an experiment design assumes:
-    matched mean degree between two scenarios, a network that is (or isn't)
-    fully connected, etc.
-
-    Mean shortest-path length is expensive (roughly O(n * m) via
-    breadth-first search from every node) and undefined for a disconnected
-    graph, so it is computed on the largest connected component only, and
-    skipped entirely above ``path_length_node_cap`` nodes. ``path_length_note``
-    always explains what (if anything) was skipped and why.
-    """
-    n = graph.number_of_nodes()
-    degrees = np.array([d for _, d in graph.degree()], dtype=float)
+    """Summarize graph structure, computing path length when practical."""
+    node_count = graph.number_of_nodes()
+    degrees = np.array([degree for _, degree in graph.degree()], dtype=float)
     components = list(nx.connected_components(graph))
-    num_components = len(components)
-    largest_component_size = max((len(c) for c in components), default=0)
+    component_count = len(components)
+    largest_component_size = max((len(component) for component in components),
+                                 default=0)
 
     average_shortest_path_length = float("nan")
     path_length_computed = False
-    if n == 0:
+    if node_count == 0:
         path_length_note = "empty graph"
-    elif n > path_length_node_cap:
+    elif node_count > path_length_node_cap:
         path_length_note = (
-            f"skipped: {n} nodes exceeds path_length_node_cap={path_length_node_cap}"
-        )
+            f"skipped: {node_count} nodes exceeds "
+            f"path_length_node_cap={path_length_node_cap}")
     elif largest_component_size < 2:
         path_length_note = "skipped: no component with more than one node"
     else:
-        if num_components == 1:
+        if component_count == 1:
             target_graph = graph
             path_length_note = "computed on the full (connected) graph"
         else:
@@ -227,25 +214,26 @@ def network_topology_report(
             target_graph = graph.subgraph(largest_nodes)
             path_length_note = (
                 f"computed on the largest connected component only "
-                f"({largest_component_size}/{n} nodes); graph has "
-                f"{num_components} components"
-            )
+                f"({largest_component_size}/{node_count} nodes); graph has "
+                f"{component_count} components")
         average_shortest_path_length = float(
             nx.average_shortest_path_length(target_graph))
         path_length_computed = True
 
     return {
-        "node_count": float(n),
+        "node_count": float(node_count),
         "edge_count": float(graph.number_of_edges()),
-        "mean_degree": float(degrees.mean()) if n else 0.0,
-        "std_degree": float(degrees.std(ddof=1)) if n > 1 else 0.0,
-        "min_degree": float(degrees.min()) if n else 0.0,
-        "max_degree": float(degrees.max()) if n else 0.0,
-        "clustering_coefficient": float(nx.average_clustering(graph)) if n > 1 else 0.0,
-        "num_connected_components": float(num_components),
+        "mean_degree": float(degrees.mean()) if node_count else 0.0,
+        "std_degree": float(degrees.std(ddof=1)) if node_count > 1 else 0.0,
+        "min_degree": float(degrees.min()) if node_count else 0.0,
+        "max_degree": float(degrees.max()) if node_count else 0.0,
+        "clustering_coefficient": (
+            float(nx.average_clustering(graph)) if node_count > 1 else 0.0),
+        "num_connected_components": float(component_count),
         "largest_component_size": float(largest_component_size),
         "largest_component_fraction": (
-            float(largest_component_size) / n if n else float("nan")),
+            float(largest_component_size) / node_count
+            if node_count else float("nan")),
         "average_shortest_path_length": average_shortest_path_length,
         "path_length_computed": path_length_computed,
         "path_length_note": path_length_note,

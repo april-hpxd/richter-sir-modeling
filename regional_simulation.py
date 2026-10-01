@@ -77,6 +77,8 @@ class RegionalSimulation:
                     config.behavioral_response_factor
                     if config.behavioral_response_enabled else None),
                 isolation_contact_multiplier=config.isolation_contact_multiplier,
+                vaccination_count=config.resolved_vaccination_count(size),
+                vaccination_strategy=config.vaccination_strategy,
             )
             self.cities.append(City(city_id, city_config, city_rng))
 
@@ -334,4 +336,11 @@ class RegionalSimulation:
             "regional_duration_censored": any(
                 s["duration_censored"] for s in city_summaries),
             "network_reports": [city.network_report() for city in self.cities],
+            "vaccination_reports": [
+                city.vaccination_report() for city in self.cities],
+            "total_vaccinated": sum(
+                len(city.vaccinated_ids) for city in self.cities),
+            "regional_vaccination_coverage": (
+                sum(len(city.vaccinated_ids) for city in self.cities) / total_pop
+                if total_pop else 0.0),
         }

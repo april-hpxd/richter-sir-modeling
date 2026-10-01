@@ -80,10 +80,13 @@ def summary(history: List[DailyRecord]) -> Dict[str, float]:
         duration, and the final compartment counts.
     """
     final = history[-1]
-    population = (final.susceptible + final.exposed
-                  + final.infectious + final.recovered)
-    # Everyone who ever left Susceptible was infected at some point.
-    total_infected = population - final.susceptible
+    population = (final.susceptible + final.exposed + final.infectious
+                  + final.recovered + final.vaccinated)
+    # Everyone who ever left Susceptible for Exposed was infected at some
+    # point. Computed directly (not as `population - final.susceptible`):
+    # that difference would also include the permanently immune Vaccinated
+    # compartment, over-counting them as "infected".
+    total_infected = final.exposed + final.infectious + final.recovered
     attack_rate = total_infected / population if population else 0.0
 
     peak_inf = peak(history, "infectious")
@@ -101,6 +104,9 @@ def summary(history: List[DailyRecord]) -> Dict[str, float]:
         "duration_censored": is_duration_censored(history),
         "final_susceptible": float(final.susceptible),
         "final_recovered": float(final.recovered),
+        "vaccinated": float(final.vaccinated),
+        "vaccination_coverage": (
+            final.vaccinated / population if population else 0.0),
     }
 
 
@@ -118,10 +124,10 @@ def export_csv(history: List[DailyRecord], path: str) -> None:
         writer = csv.writer(handle)
         writer.writerow([
             "day", "susceptible", "exposed", "infectious", "recovered",
-            "new_exposed", "new_infectious", "new_recovered",
+            "vaccinated", "new_exposed", "new_infectious", "new_recovered",
         ])
         for r in history:
             writer.writerow([
                 r.day, r.susceptible, r.exposed, r.infectious, r.recovered,
-                r.new_exposed, r.new_infectious, r.new_recovered,
+                r.vaccinated, r.new_exposed, r.new_infectious, r.new_recovered,
             ])

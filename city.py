@@ -31,6 +31,7 @@ from interaction import (
     WellMixedContactModel,
 )
 from simulation import DailyRecord
+from vaccination import vaccinate_random, vaccination_report
 
 
 @dataclass
@@ -92,6 +93,8 @@ class CityConfig:
     daily_contacts_max: Optional[int] = None
     behavioral_response_factor: Optional[float] = None
     isolation_contact_multiplier: float = 1.0
+    vaccination_count: int = 0
+    vaccination_strategy: str = "random"
 
 
 class City:
@@ -135,6 +138,10 @@ class City:
             behavioral_response_factor=config.behavioral_response_factor,
             isolation_contact_multiplier=config.isolation_contact_multiplier,
         )
+        self.vaccinated_ids: List[int] = (
+            vaccinate_random(self.engine.individuals,
+                             config.vaccination_count, self.rng)
+            if config.vaccination_count else [])
 
         self.history: List[DailyRecord] = []
         self.state_frames: List[List[State]] = []
@@ -280,6 +287,7 @@ class City:
             new_exposed=new_exposed,
             new_infectious=new_infectious,
             new_recovered=new_recovered,
+            vaccinated=counts["V"],
         )
         self.history.append(record)
         self.state_frames.append(self.engine.states())
@@ -439,18 +447,17 @@ class City:
             persistent_contact_lists(graph, self.config.population_size),
             getattr(model, "cluster_of", None), graph)
 
-    def network_report(self) -> Dict[str, object]:
-        """One-off structural report (degree, clustering, path length,
-        connected components) for this city's current contact graph.
+    def vaccination_report(self) -> dict:
+        """Return this city's vaccination metadata."""
+        return vaccination_report(
+            enabled=bool(self.vaccinated_ids),
+            strategy=self.config.vaccination_strategy,
+            vaccinated_ids=self.vaccinated_ids,
+            population_size=self.config.population_size,
+        )
 
-        For a persistent model (``random-network``, ``watts-strogatz``) this
-        describes the one fixed graph used every day. For a daily-resampled
-        model (``daily-random``, ``clustered``) it describes only the most
-        recently prepared day's snapshot graph -- a representative sample,
-        not an average over the run (see :meth:`contact_structure_summary`
-        for the day-averaged degree/clustering statistics instead). Returns
-        an empty dict for models with no graph (e.g. ``well-mixed``).
-        """
+    def network_report(self) -> Dict[str, object]:
+        """Report this city's contact graph, if the model has one."""
         from interaction import network_topology_report
         graph = getattr(self.engine.contact_model, "graph", None)
         if graph is None:
@@ -596,10 +603,8 @@ class City:
         Returns:
             Dict with keys: population, peak_infectious, peak_infectious_day,
             peak_exposed, peak_exposed_day, total_infected, attack_rate,
-            epidemic_duration_days, duration_censored (True if the disease
-            was still active on the last recorded day, meaning duration is a
-            lower bound rather than the true extinction time), final_susceptible,
-            final_recovered, first_infection_day (or -1 if no infection).
+            epidemic_duration_days, final_susceptible, final_recovered,
+            first_infection_day (or -1 if no infection).
         """
         if not self.history:
             return {
@@ -611,22 +616,25 @@ class City:
                 "total_infected": 0.0,
                 "attack_rate": 0.0,
                 "epidemic_duration_days": 0.0,
-                "final_susceptible": float(self.config.population_size),
+                "duration_censored": False,
+                "final_susceptible": float(
+                    self.config.population_size - len(self.vaccinated_ids)),
                 "final_recovered": 0.0,
+                "vaccinated": float(len(self.vaccinated_ids)),
+                "vaccination_coverage": (
+                    len(self.vaccinated_ids) / self.config.population_size),
                 "first_infection_day": -1.0,
                 "peak_recovered": 0.0,
                 "peak_recovered_day": -1.0,
                 "day_outbreak_began": -1.0,
                 "day_outbreak_peaked": -1.0,
                 "imported_infections": float(self.imported_infections),
-                "duration_censored": False,
             }
 
         final = self.history[-1]
         population = self.config.population_size
 
-        # Total infected = everyone who left susceptible
-        total_infected = population - final.susceptible
+        total_infected = final.exposed + final.infectious + final.recovered
         attack_rate = total_infected / population if population else 0.0
 
         peak_inf = max(self.history, key=lambda r: r.infectious)
@@ -654,8 +662,13 @@ class City:
             "total_infected": float(total_infected),
             "attack_rate": attack_rate,
             "epidemic_duration_days": float(epidemic_duration),
+            "duration_censored": bool(
+                (final.exposed + final.infectious) > 0),
             "final_susceptible": float(final.susceptible),
             "final_recovered": float(final.recovered),
+            "vaccinated": float(final.vaccinated),
+            "vaccination_coverage": (
+                final.vaccinated / population if population else 0.0),
             "first_infection_day": float(first_infection_day),
             "peak_recovered": float(peak_rec.recovered),
             "peak_recovered_day": float(peak_rec.day),
@@ -663,10 +676,4 @@ class City:
             "day_outbreak_began": float(first_infection_day),
             "day_outbreak_peaked": float(peak_inf.day),
             "imported_infections": float(self.imported_infections),
-            # True if E+I was still > 0 on the last recorded day: the run
-            # ended because it hit simulation_days, not because the
-            # epidemic went extinct, so epidemic_duration_days is a lower
-            # bound on the true (unobserved) duration, not the true value.
-            # See epidemic_stats.is_duration_censored for the same logic.
-            "duration_censored": bool((final.exposed + final.infectious) > 0),
         }

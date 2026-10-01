@@ -309,7 +309,7 @@ class DiseaseEngine:
         """Return the current number of individuals in each compartment.
 
         Returns:
-            Dict with integer keys ``"S"``, ``"E"``, ``"I"``, ``"R"``.
+            Dict with integer keys ``"S"``, ``"E"``, ``"I"``, ``"R"``, ``"V"``.
         """
         tally = {s: 0 for s in State}
         for ind in self.individuals:
@@ -319,6 +319,7 @@ class DiseaseEngine:
             "E": tally[State.EXPOSED],
             "I": tally[State.INFECTIOUS],
             "R": tally[State.RECOVERED],
+            "V": tally[State.VACCINATED],
         }
 
     def states(self) -> List[State]:

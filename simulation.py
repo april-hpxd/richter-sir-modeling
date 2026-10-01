@@ -21,6 +21,7 @@ from engine import DiseaseEngine
 from interaction import (
     build_contact_model,
 )
+from vaccination import vaccinate_random, vaccination_report
 
 
 @dataclass
@@ -46,6 +47,7 @@ class DailyRecord:
     new_exposed: int
     new_infectious: int
     new_recovered: int
+    vaccinated: int = 0
 
 
 class Simulation:
@@ -83,6 +85,19 @@ class Simulation:
                 config.behavioral_response_factor
                 if config.behavioral_response_enabled else None),
         )
+
+        # Vaccinate before any seeding, so "vaccination occurs before the
+        # outbreak begins" holds literally: at this point everyone is still
+        # SUSCEPTIBLE, so vaccinate_random's eligible pool is simply whoever
+        # hasn't been chosen yet. Skipped entirely (no RNG draw) when
+        # disabled, so an unconfigured run's random stream -- and therefore
+        # its whole trajectory -- is bit-for-bit unchanged from before
+        # vaccination existed.
+        vaccination_count = config.resolved_vaccination_count(
+            config.population_size)
+        self.vaccinated_ids: List[int] = (
+            vaccinate_random(self.engine.individuals, vaccination_count, self.rng)
+            if vaccination_count else [])
 
         # Seed patient zeros as EXPOSED and record the day-0 baseline.
         self.engine.seed_exposed(config.initial_infected)
@@ -169,6 +184,15 @@ class Simulation:
             persistent_contact_lists(graph, self.config.population_size),
             getattr(model, "cluster_of", None), graph)
 
+    def vaccination_report(self) -> dict:
+        """Return this run's vaccination metadata (see ``vaccination.py``)."""
+        return vaccination_report(
+            enabled=bool(self.vaccinated_ids),
+            strategy=self.config.vaccination_strategy,
+            vaccinated_ids=self.vaccinated_ids,
+            population_size=self.config.population_size,
+        )
+
     def network_report(self):
         """One-off structural report (degree, clustering, path length,
         connected components) for this run's current contact graph. See
@@ -208,6 +232,7 @@ class Simulation:
             new_exposed=new_exposed,
             new_infectious=new_infectious,
             new_recovered=new_recovered,
+            vaccinated=counts["V"],
         )
         self.history.append(record)
         self.state_frames.append(self.engine.states())

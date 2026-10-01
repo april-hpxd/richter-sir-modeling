@@ -251,6 +251,14 @@ does not assume that higher clustering must reduce transmission.
 | `--isolation-travel-multiplier` | 0.0 | Travel-matrix multiplier for an isolated city. |
 | `--isolation-contact-multiplier` | 1.0 | Extra in-city contact multiplier while isolated. |
 
+### Vaccination
+| Parameter | Default | Meaning |
+|---|---|---|
+| `--vaccination-rate` | 0.0 | Fraction of each city's population vaccinated before the outbreak begins. `0` disables vaccination. |
+| `--vaccination-strategy` | random | How vaccinated individuals are chosen (`random` is the only strategy so far). |
+
+See [Vaccination](#vaccination) below for what this models and what it doesn't.
+
 ### Experiments
 | Parameter | Meaning |
 |---|---|
@@ -265,6 +273,14 @@ does not assume that higher clustering must reduce transmission.
 | `--travel-rate-sweep-runs` | Seeds run per rate (default 5). |
 | `--travel-rate-sweep-csv PATH` | Where every travel-rate-sweep run is written. |
 | `--validate` | Run the validation suite and print a pass/fail report. |
+| `--vaccination-coverage-sweep` | Run the vaccination dose-response experiment (see [Vaccination Coverage Experiment](#vaccination-coverage-experiment)). |
+| `--vaccination-rates` | Comma-separated rates to sweep (default `0.00, 0.05, ..., 0.60`, 13 points). |
+| `--vaccination-sweep-runs` | Replicates per rate (default 500; use e.g. `5` for a quick test). |
+| `--vaccination-sweep-base-seed` | First seed of the shared seed set reused at every rate. |
+| `--vaccination-sweep-csv PATH` | Where every individual replicate is written. |
+| `--vaccination-sweep-summary-csv PATH` | Where the one-row-per-rate summary is written. |
+| `--vaccination-sweep-plot PATH` | Optional dose-response plot (attack rate / invasion / major-outbreak probability vs rate). |
+| `--major-outbreak-threshold` | `total_infected` cutoff for a "major outbreak" (default 20). |
 
 ### Visualization
 | Parameter | Default | Meaning |
@@ -282,6 +298,131 @@ does not assume that higher clustering must reduce transmission.
 | Parameter | Default | Meaning |
 |---|---|---|
 | `--random-seed` | 42 | Seed for all randomness. |
+
+## Vaccination
+
+An optional, pre-outbreak intervention, disabled by default. It exists to let
+experiments compare an outbreak with and without a baseline level of immunity
+already in the population, not to model a real vaccine's behavior.
+
+- **Optional**: a plain `python main.py ...` run is completely unaffected —
+  vaccination only activates when `--vaccination-rate` is set above `0`, and
+  when it's off the simulation doesn't even draw any extra randomness, so
+  every existing run/experiment/CSV is reproduced bit-for-bit.
+- **Current vaccine effectiveness is 100%**: a vaccinated individual can
+  never become infected and, since they can never become infectious, can
+  never transmit either.
+- **Vaccination happens before the simulation begins.** A configurable
+  fraction of each city's population (`--vaccination-rate`, e.g. `0.1` for
+  10%) is chosen uniformly at random (`--vaccination-strategy random`,
+  currently the only strategy) from the still-fully-susceptible population,
+  before the initial cases are seeded and before day 0 of the simulation.
+  Nobody is vaccinated mid-outbreak.
+- **Vaccinated individuals cannot be infected or transmit the disease.**
+  They occupy a fifth disease state, `V` (alongside `S`/`E`/`I`/`R`), and stay
+  `V` for the entire run — there is no waning immunity and no path back to
+  `S`, `I`, or `R`.
+- **How to enable it**: add `--vaccination-rate RATE` (0–1) to any
+  single-city or regional run, e.g.:
+  ```bash
+  python main.py --single-city --vaccination-rate 0.3 --save-gif out.gif
+  python main.py --regional --number-of-cities 2 --vaccination-rate 0.2 --save-curves curves.png
+  ```
+- **What the output records**: the console summary prints whether
+  vaccination was used, how many people were vaccinated, and the resulting
+  coverage, for the run as a whole (single-city) and per city plus a
+  regional total (regional runs). The same figures are available
+  programmatically from `Simulation.vaccination_report()` /
+  `City.vaccination_report()` and from `RegionalSimulation.regional_summary()`
+  (`vaccination_reports`, `total_vaccinated`, `regional_vaccination_coverage`).
+  The day-by-day CSV export (`--export-csv`) gets a `vaccinated` column, and
+  the SEIR curve plot and network animation show vaccinated individuals in a
+  distinct color (only when the run actually used vaccination).
+
+**This is a simplified intervention model for controlled simulation
+experiments, not a realistic representation of how vaccines work.** It does
+not model waning immunity, booster doses, partial effectiveness, vaccine
+hesitancy, demographic targeting, vaccination campaigns during an active
+outbreak, contact tracing, or multiple vaccine types — those are possible
+future extensions, not part of this milestone.
+
+### Vaccination Coverage Experiment
+
+A dose-response experiment: run many replicates at each of several
+vaccination rates and compare outcomes across rates. Builds entirely on the
+existing experiment-runner machinery (`experiments.py`'s `RunResult` and
+`mean_and_ci`) — no new simulation behavior.
+
+**Quick test** (small, fast — run this before the full sweep):
+```bash
+python main.py --regional --number-of-cities 2 --population-per-city 50 \
+  --vaccination-coverage-sweep --vaccination-sweep-runs 5
+```
+
+**Full 0–60% experiment** (13 rates × 500 replicates = 6,500 simulations —
+budget real time for this; see Performance below):
+```bash
+python main.py --regional --number-of-cities 2 --population-per-city 50 \
+  --vaccination-coverage-sweep --vaccination-sweep-runs 500 \
+  --vaccination-sweep-csv vaccination_runs.csv \
+  --vaccination-sweep-summary-csv vaccination_summary.csv \
+  --vaccination-sweep-plot vaccination_dose_response.png
+```
+Omit `--vaccination-rates` to use the default 13 points (`0.00, 0.05, ...,
+0.60`); pass a comma-separated list (e.g. `--vaccination-rates 0,0.1,0.2,0.3`)
+to sweep a different set. Every rate reuses the same
+`--vaccination-sweep-base-seed .. + --vaccination-sweep-runs - 1` seed set
+(common random numbers), so differences between rates reflect the swept
+coverage, not seed noise.
+
+**Definitions used in the output:**
+- **`vaccination_rate`**: fraction of each city's population vaccinated
+  before the outbreak begins (see [Vaccination](#vaccination)).
+- **Major outbreak**: `total_infected >= 20` for that replicate (the
+  `--major-outbreak-threshold` default; change it explicitly if you want a
+  different cutoff — it is never changed silently).
+- **Invasion probability**: the fraction of *all* replicates at a rate in
+  which the outbreak reached at least one city beyond the seed city
+  (`cities_reached > 1` — "City-2 invasion" in the 2-city setup). A run
+  where the seeded cases burned out locally counts as a non-invasion (`0`),
+  not as missing data.
+- **Arrival delay (`mean_arrival_delay_successful`)**: the mean days-to-
+  arrival, computed **only** over replicates that actually invaded
+  (`successful_invasions` gives that count) — a non-invading replicate has
+  no arrival day and is excluded, not coerced to `-1` or `0`.
+
+**Output files:**
+- `--vaccination-sweep-csv` (default `vaccination_coverage_runs.csv`): one
+  row per replicate, every `RunResult` field (identification, model,
+  network, and outcome columns — same schema as `--experiment-csv`), so any
+  summary statistic can be recomputed later without rerunning.
+- `--vaccination-sweep-summary-csv` (default
+  `vaccination_coverage_summary.csv`): one row per vaccination rate —
+  `n_runs`, mean/median attack rate with 95% CI, mean peak infectious/
+  epidemic duration with CI, invasion probability with CI, major-outbreak
+  count/percent/median attack rate, plus a major-outbreaks-only breakdown
+  (`major_outbreak_mean_*`) and censoring visibility (`n_censored`,
+  `censored_fraction` — see `epidemic_stats.is_duration_censored`; a
+  censored run's duration is a lower bound, not a true extinction time, and
+  is never silently averaged in as if it were one).
+- `--vaccination-sweep-plot` (optional): a 3-panel PNG — attack rate,
+  invasion probability (both with 95% CI error bars), and major-outbreak
+  probability, each against vaccination rate.
+
+**Performance**: each replicate is one full regional simulation; the full
+13-rate × 500-run experiment is 6,500 simulations and will take a while (a
+5-run smoke test on this machine took a few seconds per rate — scale that up
+to estimate your own runtime before launching the full sweep). No
+parallelism is used (none exists elsewhere in this project), so start with a
+small `--vaccination-sweep-runs` to validate your configuration first.
+
+**Methodological note**: this experiment compares outcomes across
+vaccination coverage levels for *this simulated population and contact
+structure*. It does not establish a real-world vaccination threshold, and
+the infection probability swept elsewhere in this project is a per-contact
+transmission probability, not a validated estimate of a basic reproduction
+number (`R0`) — see `Config.estimated_r0()` for the simulator's own
+explicitly-approximate formula, used nowhere in this experiment's analysis.
 
 ## Architecture
 

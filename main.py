@@ -32,11 +32,15 @@ from typing import List, Optional
 import json
 
 from analysis import InterventionSpec, analyze_network_importance, evaluate_interventions, print_decision_support_report
-from config import CONTACT_MODELS, Config
+from config import CONTACT_MODELS, VACCINATION_STRATEGIES, Config
 from experiments import (
-    print_experiment_report, run_experiment, run_scenario_comparison,
-    run_sensitivity_analysis, run_travel_rate_sweep, write_experiment_csv,
-    write_scenario_comparison_csv,
+    DEFAULT_MAJOR_OUTBREAK_THRESHOLD, DEFAULT_VACCINATION_COVERAGE_RATES,
+    print_experiment_report, print_vaccination_coverage_report,
+    run_experiment, run_scenario_comparison, run_sensitivity_analysis,
+    run_travel_rate_sweep, run_vaccination_coverage_sweep,
+    summarize_vaccination_coverage, write_experiment_csv,
+    write_scenario_comparison_csv, write_vaccination_coverage_runs_csv,
+    write_vaccination_coverage_summary_csv,
 )
 from node_export import export_node_level_csv, export_node_level_csv_single
 from regional_simulation import RegionalSimulation
@@ -171,6 +175,17 @@ def build_parser() -> argparse.ArgumentParser:
                                "while isolated (on top of any behavioral "
                                "response; 1.0 = no change).")
 
+    vaccination = p.add_argument_group("vaccination (pre-outbreak, optional)")
+    vaccination.add_argument("--vaccination-rate", type=float,
+                             default=d.vaccination_rate,
+                             help="Fraction (0-1) of each city's population "
+                                  "to vaccinate before the outbreak begins. "
+                                  "0 (default) disables vaccination entirely.")
+    vaccination.add_argument("--vaccination-strategy",
+                             choices=VACCINATION_STRATEGIES,
+                             default=d.vaccination_strategy,
+                             help="How vaccinated individuals are chosen.")
+
     exp = p.add_argument_group("experiments")
     exp.add_argument("--experiment", type=int, default=0, metavar="N",
                      help="Run the regional config N times over different seeds "
@@ -225,6 +240,42 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("--validate", action="store_true",
                      help="Run the validation suite and print a pass/fail "
                           "report instead of a normal simulation.")
+
+    vax_sweep = p.add_argument_group("vaccination coverage sweep")
+    vax_sweep.add_argument("--vaccination-coverage-sweep", action="store_true",
+                           help="Run a dose-response experiment over a range "
+                                "of vaccination rates (replacing --vaccination-"
+                                "rate for this run): Config.vaccination_rate "
+                                "is swept across --vaccination-rates with "
+                                "--vaccination-sweep-runs replicates per rate "
+                                "(common random numbers, same seed set at "
+                                "every rate).")
+    vax_sweep.add_argument("--vaccination-rates", default=None,
+                           help="Comma-separated vaccination rates to sweep, "
+                                "e.g. '0,0.1,0.2,0.3'. Defaults to "
+                                "0.00, 0.05, ..., 0.60 (13 points).")
+    vax_sweep.add_argument("--vaccination-sweep-runs", type=int, default=500,
+                           help="Replicates per rate. Use a small value "
+                                "(e.g. 5) for a quick test before a full run.")
+    vax_sweep.add_argument("--vaccination-sweep-base-seed", type=int, default=0,
+                           help="First seed of the shared seed set reused at "
+                                "every rate.")
+    vax_sweep.add_argument("--vaccination-sweep-csv", metavar="PATH",
+                           default="vaccination_coverage_runs.csv",
+                           help="Where every individual replicate is written "
+                                "(one row per run).")
+    vax_sweep.add_argument("--vaccination-sweep-summary-csv", metavar="PATH",
+                           default="vaccination_coverage_summary.csv",
+                           help="Where the one-row-per-rate dose-response "
+                                "summary is written.")
+    vax_sweep.add_argument("--vaccination-sweep-plot", metavar="PATH", default=None,
+                           help="If given, save a dose-response plot (attack "
+                                "rate / invasion probability / major-outbreak "
+                                "probability vs vaccination rate) to this path.")
+    vax_sweep.add_argument("--major-outbreak-threshold", type=int,
+                           default=DEFAULT_MAJOR_OUTBREAK_THRESHOLD,
+                           help="total_infected threshold defining a 'major "
+                                "outbreak' in the sweep's analysis.")
 
     out = p.add_argument_group("visualization and output")
     out.add_argument("--visualization-mode",
@@ -326,6 +377,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         isolation_infectious_threshold=args.isolation_threshold,
         isolation_travel_multiplier=args.isolation_travel_multiplier,
         isolation_contact_multiplier=args.isolation_contact_multiplier,
+        vaccination_rate=args.vaccination_rate,
+        vaccination_strategy=args.vaccination_strategy,
     )
 
 
@@ -350,6 +403,11 @@ def print_report(simulation: Simulation, config: Config) -> None:
     print(f"  Attack rate:         {100 * stats['attack_rate']:.1f}%")
     print(f"  Epidemic duration:   {int(stats['epidemic_duration_days'])} days")
     print(f"  Final susceptible:   {int(stats['final_susceptible'])}")
+    vacc = simulation.vaccination_report()
+    if vacc["vaccination_enabled"]:
+        print(f"  Vaccination:         {vacc['number_vaccinated']} "
+              f"({100 * vacc['vaccination_coverage']:.1f}% coverage, "
+              f"strategy: {vacc['vaccination_strategy']})")
     print("=" * 48 + "\n")
 
 
@@ -381,6 +439,10 @@ def print_regional_report(regional_sim: RegionalSimulation,
         isolated_cities = [city_label(i) for i, isolated in
                           enumerate(summary_data["cities_isolated"]) if isolated]
         print(f"  Cities isolated:       {', '.join(isolated_cities)}")
+    if summary_data["total_vaccinated"] > 0:
+        print(f"  Total vaccinated:      {summary_data['total_vaccinated']} "
+              f"({100 * summary_data['regional_vaccination_coverage']:.1f}% "
+              "regional coverage)")
     print()
 
     for city, city_stats in zip(regional_sim.cities, summary_data["city_summaries"]):
@@ -404,6 +466,9 @@ def print_regional_report(regional_sim: RegionalSimulation,
         print(f"    Epidemic duration: {int(city_stats['epidemic_duration_days'])} days")
         print(f"    Imported cases:    {int(city_stats['imported_infections'])}")
         print(f"    Exported cases:    {int(city_stats['exported_infections'])}")
+        if city_stats["vaccinated"] > 0:
+            print(f"    Vaccinated:        {int(city_stats['vaccinated'])} "
+                  f"({100 * city_stats['vaccination_coverage']:.1f}% coverage)")
 
     print()
     print("  Travel statistics:")
@@ -441,6 +506,8 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if args.sensitivity_config:
         run_sensitivity_mode(config, args)
+    elif args.vaccination_coverage_sweep:
+        run_vaccination_coverage_mode(config, args)
     elif args.scenario_comparison:
         run_scenario_comparison_mode(config, args)
     elif args.travel_rate_sweep:
@@ -639,6 +706,47 @@ def run_travel_rate_sweep_mode(config: Config, args: argparse.Namespace) -> None
     run_travel_rate_sweep(
         config, rates=rates, runs_per_combo=args.travel_rate_sweep_runs,
         csv_path=args.travel_rate_sweep_csv, verbose=not args.quiet)
+
+
+def run_vaccination_coverage_mode(config: Config, args: argparse.Namespace) -> None:
+    """Run the vaccination-coverage dose-response experiment.
+
+    Sweeps ``Config.vaccination_rate`` (the base ``config``'s own
+    ``vaccination_rate``/``--vaccination-rate``, if set, is overridden per
+    point) across ``--vaccination-rates`` with ``--vaccination-sweep-runs``
+    replicates per rate, writes the raw per-replicate CSV and the one-row-
+    per-rate summary CSV, prints the ALL RUNS / MAJOR OUTBREAKS ONLY report,
+    and optionally saves a dose-response plot.
+
+    Args:
+        config: The validated base configuration (every other field is held
+            fixed; only ``vaccination_rate`` is swept).
+        args: The parsed command-line arguments.
+    """
+    if args.vaccination_rates:
+        rates = tuple(float(r.strip()) for r in args.vaccination_rates.split(",")
+                     if r.strip())
+    else:
+        rates = DEFAULT_VACCINATION_COVERAGE_RATES
+    num_runs = args.vaccination_sweep_runs
+    base_seed = args.vaccination_sweep_base_seed
+    print(f"Running vaccination-coverage sweep: {len(rates)} rates x "
+          f"{num_runs} runs = {len(rates) * num_runs} simulations "
+          f"(seeds {base_seed}..{base_seed + num_runs - 1} at every rate)...")
+    runs = run_vaccination_coverage_sweep(
+        config, vaccination_rates=rates, num_runs=num_runs,
+        base_seed=base_seed, verbose=not args.quiet)
+    write_vaccination_coverage_runs_csv(runs, args.vaccination_sweep_csv)
+    summary_rows = summarize_vaccination_coverage(
+        runs, major_outbreak_threshold=args.major_outbreak_threshold)
+    write_vaccination_coverage_summary_csv(
+        summary_rows, args.vaccination_sweep_summary_csv)
+    print_vaccination_coverage_report(
+        summary_rows, major_outbreak_threshold=args.major_outbreak_threshold)
+    if args.vaccination_sweep_plot:
+        visualization.plot_vaccination_dose_response(
+            summary_rows, save_path=args.vaccination_sweep_plot,
+            show=args.show)
 
 
 def run_validation_mode(args: argparse.Namespace) -> None:

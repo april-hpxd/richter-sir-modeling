@@ -1,7 +1,9 @@
 """Visualization: contact-network animations and SEIR curves.
 
 Colour convention: Susceptible = light grey, Exposed = orange,
-Infectious = red, Recovered = green
+Infectious = red, Recovered = green, Vaccinated = purple (only shown when a
+run actually used vaccination, so an unvaccinated run's legend/curves are
+pixel-for-pixel unchanged from before vaccination existed).
 """
 
 from __future__ import annotations
@@ -28,12 +30,14 @@ STATE_COLOR: Dict[State, str] = {
     State.EXPOSED: "#f4a261",      # orange
     State.INFECTIOUS: "#e63946",   # red
     State.RECOVERED: "#2a9d8f",    # green
+    State.VACCINATED: "#6a4c93",   # purple
 }
 STATE_LABEL: Dict[State, str] = {
     State.SUSCEPTIBLE: "Susceptible",
     State.EXPOSED: "Exposed",
     State.INFECTIOUS: "Infectious",
     State.RECOVERED: "Recovered",
+    State.VACCINATED: "Vaccinated",
 }
 
 Position = Tuple[float, float]
@@ -132,9 +136,17 @@ def _resolve_layout(n: int, layout: str,
     return circle_layout(n) if layout == "circle" else grid_layout(n)
 
 
-def _legend_handles() -> List[Patch]:
-    """Return legend patches for the S/E/I/R colour scheme."""
-    return [Patch(color=STATE_COLOR[s], label=STATE_LABEL[s]) for s in State]
+def _legend_handles(include_vaccinated: bool = False) -> List[Patch]:
+    """Return legend patches for the S/E/I/R colour scheme.
+
+    ``include_vaccinated`` adds the Vaccinated entry only when a run actually
+    used it, so an unvaccinated run's legend is unchanged from before
+    vaccination existed.
+    """
+    states = [s for s in State if s is not State.VACCINATED]
+    if include_vaccinated:
+        states.append(State.VACCINATED)
+    return [Patch(color=STATE_COLOR[s], label=STATE_LABEL[s]) for s in states]
 
 
 def _draw_network_edges(ax, graph, coords: np.ndarray) -> None:
@@ -302,8 +314,10 @@ def animate_states(state_frames: List[List[State]], history: List[DailyRecord],
     pad = 1.0
     ax.set_xlim(coords[:, 0].min() - pad, coords[:, 0].max() + pad)
     ax.set_ylim(coords[:, 1].min() - pad, coords[:, 1].max() + pad)
-    ax.legend(handles=_legend_handles(), loc="upper center",
-              bbox_to_anchor=(0.5, -0.02), ncol=4, frameon=False)
+    include_vaccinated = any(r.vaccinated > 0 for r in history)
+    ax.legend(handles=_legend_handles(include_vaccinated), loc="upper center",
+              bbox_to_anchor=(0.5, -0.02),
+              ncol=5 if include_vaccinated else 4, frameon=False)
 
     day_text = ax.text(0.01, 0.99, "", transform=ax.transAxes, va="top",
                        ha="left", family="monospace", fontsize=10)
@@ -366,6 +380,8 @@ def plot_curves(history: List[DailyRecord], config: Config,
         State.INFECTIOUS: [r.infectious for r in history],
         State.RECOVERED: [r.recovered for r in history],
     }
+    if any(r.vaccinated > 0 for r in history):
+        series[State.VACCINATED] = [r.vaccinated for r in history]
 
     fig, ax = plt.subplots(figsize=(9, 5.5))
     for state, values in series.items():
@@ -480,8 +496,10 @@ def animate_regional_states(regional_sim: RegionalSimulation,
         day_texts.append(day_text)
 
     # Add legend once, outside the subplots
-    fig.legend(handles=_legend_handles(), loc="lower center",
-               bbox_to_anchor=(0.5, -0.02), ncol=4, frameon=False)
+    include_vaccinated = any(r.vaccinated > 0 for city in cities for r in city.history)
+    fig.legend(handles=_legend_handles(include_vaccinated), loc="lower center",
+               bbox_to_anchor=(0.5, -0.02),
+               ncol=5 if include_vaccinated else 4, frameon=False)
 
     # Transient travel artists (arrows + labels), recreated each frame.
     travel_artists: List = []
@@ -652,6 +670,8 @@ def plot_regional_curves(regional_sim: RegionalSimulation,
             State.INFECTIOUS: [r.infectious for r in history],
             State.RECOVERED: [r.recovered for r in history],
         }
+        if any(r.vaccinated > 0 for r in history):
+            series[State.VACCINATED] = [r.vaccinated for r in history]
 
         for state, values in series.items():
             ax.plot(days, values, color=STATE_COLOR[state],
@@ -978,6 +998,72 @@ def animate_regional_clusters(regional_sim: "RegionalSimulation",
 # 
 # Dispatcher
 # 
+def plot_vaccination_dose_response(summary_rows: List[Dict],
+                                   save_path: Optional[str] = None,
+                                   show: bool = False) -> plt.Figure:
+    """Plot the vaccination-coverage dose-response summary (3 panels).
+
+    One row of ``summary_rows`` per vaccination rate, as produced by
+    ``experiments.summarize_vaccination_coverage``. Panels: attack rate,
+    invasion probability, and major-outbreak probability, each against
+    vaccination rate, with 95% CI error bars where the underlying summary
+    computed one (attack rate, invasion probability; major-outbreak
+    probability has no CI in this milestone's summary, so it is plotted
+    without error bars).
+
+    Args:
+        summary_rows: The per-rate summary dicts.
+        save_path: If given, save the figure to this image path.
+        show: If ``True``, display the figure.
+
+    Returns:
+        The created :class:`matplotlib.figure.Figure`.
+    """
+    rates = [100 * row["vaccination_rate"] for row in summary_rows]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    fig.suptitle("Vaccination coverage: dose-response", fontsize=13, weight="bold")
+
+    attack = [100 * row["mean_attack_rate"] for row in summary_rows]
+    attack_err = [
+        [100 * (row["mean_attack_rate"] - row["attack_rate_ci_low"]) for row in summary_rows],
+        [100 * (row["attack_rate_ci_high"] - row["mean_attack_rate"]) for row in summary_rows],
+    ]
+    axes[0].errorbar(rates, attack, yerr=attack_err, marker="o",
+                     color=STATE_COLOR[State.INFECTIOUS], capsize=3)
+    axes[0].set_title("Attack rate", fontsize=11, weight="bold")
+    axes[0].set_xlabel("Vaccination rate (%)")
+    axes[0].set_ylabel("Attack rate (%)")
+    axes[0].grid(alpha=0.3)
+
+    invasion = [100 * row["invasion_probability"] for row in summary_rows]
+    invasion_err = [
+        [100 * (row["invasion_probability"] - row["invasion_ci_low"]) for row in summary_rows],
+        [100 * (row["invasion_ci_high"] - row["invasion_probability"]) for row in summary_rows],
+    ]
+    axes[1].errorbar(rates, invasion, yerr=invasion_err, marker="o",
+                     color=STATE_COLOR[State.EXPOSED], capsize=3)
+    axes[1].set_title("Invasion probability", fontsize=11, weight="bold")
+    axes[1].set_xlabel("Vaccination rate (%)")
+    axes[1].set_ylabel("Invasion probability (%)")
+    axes[1].grid(alpha=0.3)
+
+    major = [row["major_outbreak_percent"] for row in summary_rows]
+    axes[2].plot(rates, major, marker="o", color=STATE_COLOR[State.VACCINATED])
+    axes[2].set_title("Major outbreak probability", fontsize=11, weight="bold")
+    axes[2].set_xlabel("Vaccination rate (%)")
+    axes[2].set_ylabel("Major outbreak runs (%)")
+    axes[2].grid(alpha=0.3)
+
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    if save_path:
+        fig.savefig(save_path, dpi=120)
+        print(f"Saved vaccination dose-response plot to {save_path}")
+    if show:
+        plt.show()
+    return fig
+
+
 def resolve_visualization_mode(regional_sim: "RegionalSimulation", mode: str) -> str:
     """Resolve ``"auto"`` to a concrete mode based on the largest city.
 
