@@ -21,7 +21,7 @@ from engine import DiseaseEngine
 from interaction import (
     build_contact_model,
 )
-from vaccination import vaccinate_random, vaccination_report
+from vaccination import vaccinate, vaccination_report
 
 
 @dataclass
@@ -96,16 +96,22 @@ class Simulation:
         vaccination_count = config.resolved_vaccination_count(
             config.population_size)
         self.vaccinated_ids: List[int] = (
-            vaccinate_random(self.engine.individuals, vaccination_count, self.rng)
+            vaccinate(self.engine.individuals, vaccination_count, self.rng,
+                     strategy=config.vaccination_strategy,
+                     graph=getattr(self.engine.contact_model, "graph", None))
             if vaccination_count else [])
 
-        # Seed patient zeros as EXPOSED and record the day-0 baseline.
-        self.engine.seed_exposed(config.initial_infected)
+        # Seed patient zeros as EXPOSED and record the day-0 baseline. The
+        # count is resolved from the configured initial-infection policy
+        # (``fixed`` keeps the literal ``config.initial_infected``, exactly
+        # as before -- see ``Config.resolved_initial_infected``).
+        initial_infected = config.resolved_initial_infected(config.population_size)
+        self.engine.seed_exposed(initial_infected)
         self.history: List[DailyRecord] = []
         self.state_frames: List[List[State]] = []
         self.person_frames: List[List[PersonSnapshot]] = []
         self.transmission_frames: List[List] = []
-        self._record(new_exposed=config.initial_infected,
+        self._record(new_exposed=initial_infected,
                      new_infectious=0, new_recovered=0)
 
     def _build_contact_model(self, config: Config):

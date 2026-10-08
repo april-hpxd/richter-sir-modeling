@@ -53,6 +53,7 @@ class RunResult:
     average_contacts: float
     std_contacts: float
     vaccination_rate: float
+    vaccination_strategy: str
 
     # -- Network structure (city 0 -- see network_report() caveat for
     #    daily-resampled models: a representative single-day snapshot, not
@@ -96,7 +97,8 @@ def _summarise_run(sim: RegionalSimulation, seed: int,
         experiment_name=experiment_name,
         replicate=replicate,
         population=int(sum(config.city_sizes())),
-        initial_infected=int(config.initial_infected),
+        initial_infected=int(config.resolved_initial_infected(
+            int(config.city_sizes()[0]))),
         contact_model=config.contact_model,
         infection_probability=float(config.infection_probability),
         incubation_days=int(config.incubation_days),
@@ -116,6 +118,7 @@ def _summarise_run(sim: RegionalSimulation, seed: int,
             stats["std_contacts"] for stats in summary["contact_statistics"]
         ])),
         vaccination_rate=float(config.vaccination_rate),
+        vaccination_strategy=str(config.vaccination_strategy),
         network_node_count=float(network_report.get("node_count", float("nan"))),
         network_edge_count=float(network_report.get("edge_count", float("nan"))),
         network_mean_degree=float(network_report.get("mean_degree", float("nan"))),

@@ -91,7 +91,7 @@ class RegionalSimulation:
 
         # Seed the outbreak in city 0 only; every other city starts fully
         # susceptible so its arrival day is meaningful.
-        seeded = config.initial_infected
+        seeded = config.resolved_initial_infected(self.cities[0].config.population_size)
         self.cities[0].seed_infection(seeded)
         for city in self.cities:
             city.record_day(

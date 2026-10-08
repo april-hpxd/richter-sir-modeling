@@ -25,7 +25,8 @@ CONTACT_MODELS = (
     "daily-random",
 )
 VISUALIZATION_MODES = ("auto", "network", "cluster", "heatmap", "pie")
-VACCINATION_STRATEGIES = ("random",)
+VACCINATION_STRATEGIES = ("random", "high_degree", "high-degree")
+INITIAL_INFECTION_POLICIES = ("fixed", "population_aware", "population-aware")
 
 # Thresholds used by "auto" mode to pick a visualization automatically from
 # the largest city's population: <= NETWORK_MAX_POPULATION individual nodes,
@@ -123,6 +124,15 @@ class Config:
     incubation_days: int = 2
     infectious_days: int = 6
     initial_infected: int = 2
+    # "fixed" (default) uses ``initial_infected`` literally, exactly as every
+    # run/experiment before this policy existed -- so old experiments (e.g.
+    # the ~6500-run vaccination coverage sweep) remain bit-for-bit
+    # reproducible without opting in to anything. "population_aware" (alias
+    # "population-aware") instead derives the count from population size via
+    # ``resolved_initial_infected``/``population_aware_initial_infected``,
+    # ignoring ``initial_infected``. See that function's docstring for the
+    # policy and the alternatives considered.
+    initial_infection_policy: str = "fixed"
 
     # --- Run control ------------------------------------------------------
     simulation_days: int = 120
@@ -251,6 +261,10 @@ class Config:
         if self.vaccination_strategy not in VACCINATION_STRATEGIES:
             raise ValueError(
                 f"vaccination_strategy must be one of {VACCINATION_STRATEGIES}.")
+        if self.initial_infection_policy not in INITIAL_INFECTION_POLICIES:
+            raise ValueError(
+                "initial_infection_policy must be one of "
+                f"{INITIAL_INFECTION_POLICIES}.")
 
         # Resolved regional structure.
         sizes = self.city_sizes()
@@ -419,6 +433,27 @@ class Config:
         hi = max(lo, min(int(hi), cap))
         return lo, hi
 
+    def resolved_initial_infected(self, population_size: int) -> int:
+        """Return how many initial (day-0, EXPOSED) cases to seed.
+
+        ``"fixed"`` (the default) returns :attr:`initial_infected` verbatim,
+        unchanged from every run before this policy existed -- so existing
+        experiments (e.g. the vaccination-coverage sweep) stay reproducible
+        with no opt-in required.
+
+        ``"population_aware"`` instead derives the count from
+        ``population_size`` via :func:`population_aware_initial_infected`,
+        ignoring :attr:`initial_infected`. Use this explicitly (e.g.
+        ``--initial-infection-policy population-aware``) for new,
+        larger-population experiments where a population-independent raw
+        count of patient-zeros (e.g. always 2, whether population is 50 or
+        100,000) is the wrong default.
+        """
+        policy = self.initial_infection_policy.replace("-", "_")
+        if policy == "fixed":
+            return self.initial_infected
+        return population_aware_initial_infected(population_size)
+
     def resolved_vaccination_count(self, population_size: int) -> int:
         """Return how many individuals of a city this size should be
         vaccinated pre-outbreak, given :attr:`vaccination_rate`.
@@ -432,6 +467,55 @@ class Config:
 # ----------------------------------------------------------------------
 # Small normalisation helpers (accept lists from JSON, store tuples)
 # ----------------------------------------------------------------------
+def population_aware_initial_infected(population_size: int) -> int:
+    """Return a bounded, population-aware day-0 seeded-case count.
+
+    Goal: roughly 1 initial case for a small population, up to 3 for a
+    medium one, and 3-5 for a large one (~100,000), increasing gradually
+    (monotonically, never decreasing) between population ~50 and ~100,000,
+    always an integer in ``[1, 5]``, and deterministic (same input always
+    gives the same output -- no RNG involved, unlike vaccinee selection).
+
+    Three candidate rules were compared before picking one:
+
+    1. ``sqrt``-based: ``round(sqrt(population) / 20)``, clipped to
+       ``[1, 5]``. Smooth and monotonic, but grows too slowly at the low end
+       (populations under ~1,600 all round to 1, then climbs continuously)
+       and is harder to reason about/explain to a reader than a threshold
+       table -- "why 1/20 of the square root?" has no intuitive answer.
+    2. ``log10``-based: ``round(1 + log10(population / 50))``, clipped to
+       ``[1, 5]``. Also smooth and monotonic, but is overly sensitive right
+       around the chosen reference population (small changes near 50 flip
+       the rounded value), and -- like the sqrt rule -- ties the count to an
+       arbitrary continuous formula instead of to population regimes an
+       epidemiologist would actually describe as "small town" / "small city"
+       / "large city".
+    3. **Piecewise thresholds (chosen)**: a small table of population
+       breakpoints, each mapping to an explicit count. This is monotonic and
+       deterministic by construction, trivially auditable ("populations
+       under 2,000 get 1 case"), and easy to adjust at a single breakpoint
+       without perturbing the curve's shape elsewhere. The only tradeoff is
+       that it is a step function rather than perfectly smooth, which is
+       fine here since the semantic meaning ("how many patient zeros") is
+       inherently a small integer, not a continuous quantity.
+
+    Breakpoints (population -> count): <200 -> 1, <2,000 -> 2, <20,000 -> 3,
+    <60,000 -> 4, >=60,000 -> 5.
+    """
+    population_size = max(1, int(population_size))
+    if population_size < 200:
+        count = 1
+    elif population_size < 2_000:
+        count = 2
+    elif population_size < 20_000:
+        count = 3
+    elif population_size < 60_000:
+        count = 4
+    else:
+        count = 5
+    return max(1, min(5, count))
+
+
 def _as_int_tuple(value: Optional[Sequence[int]]) -> Optional[Tuple[int, ...]]:
     if value is None:
         return None

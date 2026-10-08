@@ -31,7 +31,7 @@ from interaction import (
     WellMixedContactModel,
 )
 from simulation import DailyRecord
-from vaccination import vaccinate_random, vaccination_report
+from vaccination import vaccinate, vaccination_report
 
 
 @dataclass
@@ -139,8 +139,9 @@ class City:
             isolation_contact_multiplier=config.isolation_contact_multiplier,
         )
         self.vaccinated_ids: List[int] = (
-            vaccinate_random(self.engine.individuals,
-                             config.vaccination_count, self.rng)
+            vaccinate(self.engine.individuals, config.vaccination_count,
+                     self.rng, strategy=config.vaccination_strategy,
+                     graph=getattr(contact_model, "graph", None))
             if config.vaccination_count else [])
 
         self.history: List[DailyRecord] = []

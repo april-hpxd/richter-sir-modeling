@@ -174,7 +174,8 @@ differences between rows reflect the swept parameter, not seed noise.
 | `--infection-probability` | 0.06 | Per-contact transmission probability. |
 | `--incubation-days` | 2 | Days in EXPOSED state. |
 | `--infectious-days` | 6 | Days in INFECTIOUS state. |
-| `--initial-infected` | 2 | Cases seeded in city 0. |
+| `--initial-infected` | 2 | Cases seeded in city 0. Only used by the `fixed` `--initial-infection-policy` (the default). |
+| `--initial-infection-policy` | fixed | `fixed` uses `--initial-infected` literally (unchanged from before this option existed). `population-aware` instead derives a bounded (1-5), population-size-dependent count and ignores `--initial-infected` — see below. |
 | `--simulation-days` | 120 | Maximum days to simulate. |
 
 ### Contact Network
@@ -255,7 +256,7 @@ does not assume that higher clustering must reduce transmission.
 | Parameter | Default | Meaning |
 |---|---|---|
 | `--vaccination-rate` | 0.0 | Fraction of each city's population vaccinated before the outbreak begins. `0` disables vaccination. |
-| `--vaccination-strategy` | random | How vaccinated individuals are chosen (`random` is the only strategy so far). |
+| `--vaccination-strategy` | random | How vaccinated individuals are chosen: `random` (uniformly at random) or `high-degree`/`high_degree` (see below). |
 
 See [Vaccination](#vaccination) below for what this models and what it doesn't.
 
@@ -314,10 +315,26 @@ already in the population, not to model a real vaccine's behavior.
   never transmit either.
 - **Vaccination happens before the simulation begins.** A configurable
   fraction of each city's population (`--vaccination-rate`, e.g. `0.1` for
-  10%) is chosen uniformly at random (`--vaccination-strategy random`,
-  currently the only strategy) from the still-fully-susceptible population,
-  before the initial cases are seeded and before day 0 of the simulation.
-  Nobody is vaccinated mid-outbreak.
+  10%) is chosen from the still-fully-susceptible population, before the
+  initial cases are seeded and before day 0 of the simulation. Nobody is
+  vaccinated mid-outbreak.
+- **Two selection strategies** (`--vaccination-strategy`):
+  - `random` (default): each eligible individual is equally likely to be
+    chosen.
+  - `high-degree`/`high_degree`: vaccinates the individuals with the most
+    neighbors in the *pre-outbreak* contact network — i.e. targets
+    individuals with the greatest number of contacts in the pre-outbreak
+    contact network. Degree is computed once, before the epidemic starts,
+    and never recalculated as the epidemic progresses: this is a one-time,
+    static network-based intervention strategy *in the simulation*, not a
+    claim about biological or real-world vaccination optimality, and not
+    adaptive targeting, contact tracing, or outbreak-time vaccination. Ties
+    at the cutoff degree are broken with a seeded random draw (reproducible
+    given the same `--random-seed`, not dependent on node iteration order).
+    Only available for network-based contact models (`random-network`,
+    `watts-strogatz`, `clustered`, `daily-random`) — `well-mixed` has no
+    persistent network/degree and raises an error if combined with
+    `high-degree`.
 - **Vaccinated individuals cannot be infected or transmit the disease.**
   They occupy a fifth disease state, `V` (alongside `S`/`E`/`I`/`R`), and stay
   `V` for the entire run — there is no waning immunity and no path back to

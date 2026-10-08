@@ -79,6 +79,16 @@ class DiseaseEngine:
         # the most recent step(); read by the node export for `contacts_today`.
         self.last_contact_counts: Dict[int, int] = {}
         self.first_between_cluster_day: Optional[int] = None
+        # Lazily-built, memoised degree lookup for nominal_contacts() on
+        # static-graph models (random-network, watts-strogatz): their graph
+        # never changes after construction, so repeatedly calling
+        # networkx's graph.degree(id) once per individual per day (the
+        # previous behaviour) was pure, avoidable overhead -- profiling at
+        # population=5000 showed this was the single largest contributor to
+        # per-day time. Models that resample their graph daily (clustered,
+        # daily-random) already short-circuit this path via contact_lists
+        # below and never populate/use this cache.
+        self._nominal_degree_cache: Optional[Dict[int, int]] = None
 
     # 
     # Seeding
@@ -215,7 +225,9 @@ class DiseaseEngine:
             lists = getattr(self.contact_model, "contact_lists", None)
             if lists is not None:
                 return len(lists[individual_id])
-            return int(graph.degree(individual_id))
+            if self._nominal_degree_cache is None:
+                self._nominal_degree_cache = dict(graph.degree())
+            return int(self._nominal_degree_cache.get(individual_id, 0))
         return int(getattr(self.contact_model, "daily_contacts", 0))
 
     def effective_contacts(self, individual_id: int, rng: Generator) -> np.ndarray:

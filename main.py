@@ -32,7 +32,8 @@ from typing import List, Optional
 import json
 
 from analysis import InterventionSpec, analyze_network_importance, evaluate_interventions, print_decision_support_report
-from config import CONTACT_MODELS, VACCINATION_STRATEGIES, Config
+from config import (CONTACT_MODELS, INITIAL_INFECTION_POLICIES,
+                   VACCINATION_STRATEGIES, Config)
 from experiments import (
     DEFAULT_MAJOR_OUTBREAK_THRESHOLD, DEFAULT_VACCINATION_COVERAGE_RATES,
     print_experiment_report, print_vaccination_coverage_report,
@@ -85,7 +86,18 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Days infectious before recovery.")
     model.add_argument("--initial-infected", type=int,
                        default=d.initial_infected,
-                       help="Number of initial cases (seeded as exposed).")
+                       help="Number of initial cases (seeded as exposed). "
+                            "Only used by the 'fixed' --initial-infection-"
+                            "policy (the default).")
+    model.add_argument("--initial-infection-policy",
+                       choices=INITIAL_INFECTION_POLICIES,
+                       default=d.initial_infection_policy,
+                       help="'fixed' (default) uses --initial-infected "
+                            "literally, exactly as before this option "
+                            "existed. 'population-aware' instead derives a "
+                            "bounded (1-5) count from each city's "
+                            "population, ignoring --initial-infected -- use "
+                            "this for new large-population experiments.")
     model.add_argument("--simulation-days", type=int, default=d.simulation_days,
                        help="Maximum number of days to simulate.")
     model.add_argument("--random-seed", type=int, default=d.random_seed,
@@ -350,6 +362,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         incubation_days=args.incubation_days,
         infectious_days=args.infectious_days,
         initial_infected=args.initial_infected,
+        initial_infection_policy=args.initial_infection_policy,
         simulation_days=args.simulation_days,
         random_seed=args.random_seed,
         contact_model=args.contact_model,
