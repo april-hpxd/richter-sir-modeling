@@ -107,6 +107,13 @@ def summary(history: List[DailyRecord]) -> Dict[str, float]:
         "vaccinated": float(final.vaccinated),
         "vaccination_coverage": (
             final.vaccinated / population if population else 0.0),
+        # Explicit final-state fields, read directly off the last recorded
+        # day (the same record ``duration_censored`` above is derived from)
+        # so termination status is directly auditable.
+        "final_exposed": float(final.exposed),
+        "final_infectious": float(final.infectious),
+        "extinction_reached": bool((final.exposed + final.infectious) == 0),
+        "actual_days_run": int(final.day),
     }
 
 

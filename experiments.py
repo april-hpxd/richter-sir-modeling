@@ -17,9 +17,17 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from analysis import mean_and_ci
+from analysis import mean_and_ci, wilson_ci
 from config import Config
 from regional_simulation import RegionalSimulation
+
+# Major-outbreak classification threshold (attack_rate >= this is "major").
+# This is an analysis choice for this project's reporting, not a universal
+# epidemiological constant -- see README.md. Defined here (ahead of
+# RunResult/_summarise_run) so every RunResult's ``major_outbreak`` field is
+# computed from this single constant; ``is_major_outbreak()`` below re-reads
+# it as the default so callers can still override the threshold.
+DEFAULT_MAJOR_OUTBREAK_THRESHOLD = 0.20
 
 
 @dataclass
@@ -79,6 +87,23 @@ class RunResult:
     attack_rate: float
     imported_infections: int
     first_infection_days: List[float]
+
+    # -- Termination metadata (regional: summed/aggregated across cities) --
+    # ``duration_censored`` above already reflects the true final E/I state
+    # (see epidemic_stats.is_duration_censored); these fields make that
+    # final state directly auditable per row instead of only inferable.
+    final_exposed: int
+    final_infectious: int
+    extinction_reached: bool
+    actual_days_run: int
+    simulation_max_days: int
+    termination_reason: str
+
+    # -- Classification (attack_rate >= DEFAULT_MAJOR_OUTBREAK_THRESHOLD) --
+    # Computed once here so the raw CSV and any downstream summary agree by
+    # construction. For a censored run this is provisional: attack_rate has
+    # not reached its final value, so the flag may change if run further.
+    major_outbreak: bool
 
 
 def _summarise_run(sim: RegionalSimulation, seed: int,
@@ -143,6 +168,20 @@ def _summarise_run(sim: RegionalSimulation, seed: int,
         attack_rate=summary["regional_attack_rate"],
         imported_infections=int(summary["imported_infections"]),
         first_infection_days=summary["city_first_infection_days"],
+        # Regional final E/I are summed across every city: the region is
+        # only truly extinct once every city has E==0 and I==0, matching
+        # ``regional_duration_censored`` (True if ANY city is still active).
+        final_exposed=int(sum(
+            s.get("final_exposed", 0) for s in summary["city_summaries"])),
+        final_infectious=int(sum(
+            s.get("final_infectious", 0) for s in summary["city_summaries"])),
+        extinction_reached=not bool(summary["regional_duration_censored"]),
+        actual_days_run=int(sim.history[-1]["day"]) if sim.history else 0,
+        simulation_max_days=int(config.simulation_days),
+        termination_reason=(
+            "max_days" if summary["regional_duration_censored"] else "extinction"),
+        major_outbreak=bool(
+            summary["regional_attack_rate"] >= DEFAULT_MAJOR_OUTBREAK_THRESHOLD),
     )
 
 
@@ -515,21 +554,38 @@ def run_travel_rate_sweep(base_config: Config,
 # (_summarise_run / RunResult) -- no new simulation behaviour, no change to
 # how a single run is executed.
 #
-DEFAULT_MAJOR_OUTBREAK_THRESHOLD = 20
-DEFAULT_VACCINATION_COVERAGE_RATES: Tuple[float, ...] = tuple(
-    round(0.05 * i, 2) for i in range(13))  # 0.00, 0.05, ..., 0.60
+# CORRECTNESS FIX (reliability/analysis milestone): the major-outbreak
+# definition is an *attack-rate* threshold (cumulative infections / total
+# population), not a raw head-count. A fixed count (the old default, 20)
+# means "major outbreak" silently changes meaning whenever the population
+# size changes between experiments (20 infections is 40% of a 50-person city
+# but 0.4% of a 5,000-person city) -- a real bug for any cross-population-size
+# comparison. ``RunResult.attack_rate`` (via ``regional_attack_rate``) is
+# already ``total_infected / total_population`` with ``total_infected``
+# counting only ever-exposed/infectious/recovered individuals (vaccinated-but-
+# never-infected people are excluded -- see ``city.summary_stats()``/
+# Vaccination Milestone 1) and ``total_population`` summing every city's full
+# population (vaccinated people included in the denominator) -- see
+# ``regional_simulation.regional_summary()``. See CHANGELOG_RESEARCH.md for
+# the fix writeup.
+DEFAULT_VACCINATION_COVERAGE_RATES: Tuple[float, ...] = (
+    0.00, 0.05, 0.10, 0.20, 0.40, 0.60)
+# Replicates per rate, matching this milestone's documented default
+# (6 rates x 150 replicates = 900 total simulations for the full sweep).
+DEFAULT_VACCINATION_COVERAGE_REPLICATES = 150
 
 
 def is_major_outbreak(run: RunResult,
-                      threshold: int = DEFAULT_MAJOR_OUTBREAK_THRESHOLD) -> bool:
-    """Whether a run's total infections meet the major-outbreak threshold.
+                      threshold: float = DEFAULT_MAJOR_OUTBREAK_THRESHOLD) -> bool:
+    """Whether a run's attack rate meets the major-outbreak threshold.
 
-    Definition is deliberately a fixed, documented threshold on
-    ``total_infected`` (default ``20``, matching the analysis the mentor's
-    100-run pilot already reported) -- never changed silently. Pass
-    ``threshold`` explicitly to use a different cutoff.
+    Definition is a fixed, documented threshold on ``attack_rate`` (cumulative
+    infections / total population, default ``0.20`` -- never changed
+    silently). Pass ``threshold`` explicitly to use a different cutoff. Note
+    this is *this analysis's* chosen definition, not a universal
+    epidemiological constant -- see README.md.
     """
-    return run.total_infected >= threshold
+    return run.attack_rate >= threshold
 
 
 def is_successful_invasion(run: RunResult) -> bool:
@@ -549,7 +605,7 @@ def is_successful_invasion(run: RunResult) -> bool:
 def run_vaccination_coverage_sweep(
     base_config: Config,
     vaccination_rates: Sequence[float] = DEFAULT_VACCINATION_COVERAGE_RATES,
-    num_runs: int = 500,
+    num_runs: int = DEFAULT_VACCINATION_COVERAGE_REPLICATES,
     base_seed: int = 0,
     verbose: bool = False,
     experiment_name: str = "vaccination_coverage",
@@ -625,7 +681,7 @@ def _clip01(value: float) -> float:
 
 def summarize_vaccination_coverage(
     runs: List[RunResult],
-    major_outbreak_threshold: int = DEFAULT_MAJOR_OUTBREAK_THRESHOLD,
+    major_outbreak_threshold: float = DEFAULT_MAJOR_OUTBREAK_THRESHOLD,
 ) -> List[Dict[str, Any]]:
     """Aggregate :func:`run_vaccination_coverage_sweep` output, one row per rate.
 
@@ -688,8 +744,14 @@ def summarize_vaccination_coverage(
         attack_mean, _, attack_ci = mean_and_ci(attack_rates)
         peak_mean, _, peak_ci = mean_and_ci(peaks)
         duration_mean, _, duration_ci = mean_and_ci(durations)
-        invasion_mean, _, invasion_ci = mean_and_ci(invaded)
         imported_mean, _, _ = mean_and_ci(imported)
+        # Proportions (invasion, major-outbreak) use a Wilson score interval,
+        # not mean_and_ci's normal approximation: the normal approximation can
+        # fall outside [0, 1] or collapse to zero width at p=0/1, both of
+        # which happen routinely at the extreme vaccination rates.
+        n_invaded = int(sum(invaded))
+        invasion_mean = n_invaded / n if n else float("nan")
+        invasion_ci_low, invasion_ci_high = wilson_ci(n_invaded, n)
 
         successful = [r for r in rate_runs if is_successful_invasion(r)]
         arrival_delays_successful = [r.average_arrival_delay for r in successful]
@@ -697,6 +759,7 @@ def summarize_vaccination_coverage(
         major_runs = [r for r in rate_runs if is_major_outbreak(r, major_outbreak_threshold)]
         major_attack_rates = sorted(r.attack_rate for r in major_runs)
         major_invaded = [1.0 if is_successful_invasion(r) else 0.0 for r in major_runs]
+        major_outbreak_ci_low, major_outbreak_ci_high = wilson_ci(len(major_runs), n)
 
         summary_rows.append({
             "vaccination_rate": rate,
@@ -714,8 +777,8 @@ def summarize_vaccination_coverage(
             "n_censored": n_censored,
             "censored_fraction": n_censored / n if n else float("nan"),
             "invasion_probability": invasion_mean,
-            "invasion_ci_low": _clip01(invasion_mean - invasion_ci),
-            "invasion_ci_high": _clip01(invasion_mean + invasion_ci),
+            "invasion_ci_low": invasion_ci_low,
+            "invasion_ci_high": invasion_ci_high,
             "successful_invasions": len(successful),
             "mean_arrival_delay_successful": (
                 float(np.mean(arrival_delays_successful))
@@ -723,6 +786,8 @@ def summarize_vaccination_coverage(
             "mean_imported_infections": imported_mean,
             "major_outbreak_count": len(major_runs),
             "major_outbreak_percent": 100.0 * len(major_runs) / n if n else float("nan"),
+            "major_outbreak_ci_low": 100.0 * major_outbreak_ci_low,
+            "major_outbreak_ci_high": 100.0 * major_outbreak_ci_high,
             "major_outbreak_median_attack_rate": (
                 float(np.median(major_attack_rates)) if major_attack_rates
                 else float("nan")),
@@ -752,6 +817,7 @@ VACCINATION_COVERAGE_SUMMARY_FIELDS = [
     "successful_invasions", "mean_arrival_delay_successful",
     "mean_imported_infections",
     "major_outbreak_count", "major_outbreak_percent",
+    "major_outbreak_ci_low", "major_outbreak_ci_high",
     "major_outbreak_median_attack_rate",
     # Extra detail beyond the suggested column list: censoring visibility
     # (Step 6) and the major-outbreaks-only breakdown (Step 4.B).
@@ -789,7 +855,7 @@ def write_vaccination_coverage_summary_csv(
 
 
 def print_vaccination_coverage_report(summary_rows: List[Dict[str, Any]],
-                                      major_outbreak_threshold: int =
+                                      major_outbreak_threshold: float =
                                       DEFAULT_MAJOR_OUTBREAK_THRESHOLD) -> None:
     """Print the dose-response summary: ALL RUNS, then MAJOR OUTBREAKS ONLY.
 
@@ -800,7 +866,9 @@ def print_vaccination_coverage_report(summary_rows: List[Dict[str, Any]],
     """
     print("\n" + "=" * 78)
     print("  VACCINATION COVERAGE EXPERIMENT -- ALL RUNS")
-    print(f"  (major outbreak defined as total_infected >= {major_outbreak_threshold})")
+    print(f"  (major outbreak defined as attack_rate >= {major_outbreak_threshold:.0%} "
+          "-- this analysis's own chosen cutoff, not a universal "
+          "epidemiological constant)")
     print("=" * 78)
     header = (f"  {'rate':>6} {'n':>5} {'attack%':>18} {'peak':>14} "
               f"{'duration':>14} {'invasion':>22} {'major%':>8}")
@@ -829,7 +897,7 @@ def print_vaccination_coverage_report(summary_rows: List[Dict[str, Any]],
 
     print("\n" + "=" * 78)
     print("  MAJOR OUTBREAKS ONLY "
-          f"(total_infected >= {major_outbreak_threshold})")
+          f"(attack_rate >= {major_outbreak_threshold:.0%})")
     print("=" * 78)
     for row in summary_rows:
         n = row["n_runs"]

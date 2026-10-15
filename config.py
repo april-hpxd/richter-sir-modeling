@@ -166,6 +166,14 @@ class Config:
     # ``resolved_vaccination_count()``.
     vaccination_rate: float = 0.0
     vaccination_strategy: str = "random"
+    # Optional, purely additive cluster-specific vaccination: one rate per
+    # cluster (ordered by cluster id), e.g. ``(0.0, 0.2, 0.6)`` for 3
+    # clusters. ``None`` (the default) leaves the uniform ``vaccination_rate``
+    # path completely untouched -- every existing run/experiment/CLI
+    # invocation that doesn't set ``--cluster-vaccination-rates`` is
+    # unaffected. Only valid with the ``clustered`` contact model (needs
+    # cluster membership); see ``vaccination.vaccinate_cluster``.
+    cluster_vaccination_rates: Optional[Tuple[float, ...]] = None
 
     # --- Output -----------------------------------------------------------
     visualization_mode: str = "auto"
@@ -186,6 +194,8 @@ class Config:
                            _as_matrix(self.travel_matrix))
         object.__setattr__(self, "trip_duration_distribution",
                            _as_pairs(self.trip_duration_distribution))
+        object.__setattr__(self, "cluster_vaccination_rates",
+                           _as_float_tuple(self.cluster_vaccination_rates))
 
         if self.population_size < 2:
             raise ValueError("population_size must be >= 2.")
@@ -265,6 +275,23 @@ class Config:
             raise ValueError(
                 "initial_infection_policy must be one of "
                 f"{INITIAL_INFECTION_POLICIES}.")
+        if self.cluster_vaccination_rates is not None:
+            if self.contact_model != "clustered" and not self.clustered_cities:
+                raise ValueError(
+                    "cluster_vaccination_rates requires the 'clustered' "
+                    "contact model (set contact_model='clustered' for a "
+                    "single-city run, or list the city in clustered_cities "
+                    "for a regional run).")
+            if len(self.cluster_vaccination_rates) != self.num_clusters:
+                raise ValueError(
+                    "cluster_vaccination_rates must have exactly "
+                    f"num_clusters ({self.num_clusters}) entries; got "
+                    f"{len(self.cluster_vaccination_rates)}.")
+            for rate in self.cluster_vaccination_rates:
+                if not 0.0 <= rate <= 1.0:
+                    raise ValueError(
+                        f"cluster_vaccination_rates entries must be in "
+                        f"[0, 1]; got {rate!r}.")
 
         # Resolved regional structure.
         sizes = self.city_sizes()
@@ -520,6 +547,12 @@ def _as_int_tuple(value: Optional[Sequence[int]]) -> Optional[Tuple[int, ...]]:
     if value is None:
         return None
     return tuple(int(v) for v in value)
+
+
+def _as_float_tuple(value: Optional[Sequence[float]]) -> Optional[Tuple[float, ...]]:
+    if value is None:
+        return None
+    return tuple(float(v) for v in value)
 
 
 def _as_matrix(value: Optional[Sequence[Sequence[float]]]

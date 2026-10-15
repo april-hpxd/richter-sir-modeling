@@ -257,6 +257,7 @@ does not assume that higher clustering must reduce transmission.
 |---|---|---|
 | `--vaccination-rate` | 0.0 | Fraction of each city's population vaccinated before the outbreak begins. `0` disables vaccination. |
 | `--vaccination-strategy` | random | How vaccinated individuals are chosen: `random` (uniformly at random) or `high-degree`/`high_degree` (see below). |
+| `--cluster-vaccination-rates` | — | Optional per-cluster rates (e.g. `"0,0.2,0.6"`), replacing `--vaccination-rate` for the run. Requires `--contact-model clustered` (or a clustered city in a regional run) and exactly one rate per cluster. See [Cluster-Specific Vaccination](#cluster-specific-vaccination). |
 
 See [Vaccination](#vaccination) below for what this models and what it doesn't.
 
@@ -275,13 +276,14 @@ See [Vaccination](#vaccination) below for what this models and what it doesn't.
 | `--travel-rate-sweep-csv PATH` | Where every travel-rate-sweep run is written. |
 | `--validate` | Run the validation suite and print a pass/fail report. |
 | `--vaccination-coverage-sweep` | Run the vaccination dose-response experiment (see [Vaccination Coverage Experiment](#vaccination-coverage-experiment)). |
-| `--vaccination-rates` | Comma-separated rates to sweep (default `0.00, 0.05, ..., 0.60`, 13 points). |
-| `--vaccination-sweep-runs` | Replicates per rate (default 500; use e.g. `5` for a quick test). |
+| `--vaccination-rates` | Comma-separated rates to sweep (default `0.00, 0.05, 0.10, 0.20, 0.40, 0.60`, 6 points). Accepts percents too (e.g. `0,10,20`); if every value is `> 1` the list is divided by 100. |
+| `--vaccination-sweep-runs` | Replicates per rate (default 150; use e.g. `5` for a quick test). |
 | `--vaccination-sweep-base-seed` | First seed of the shared seed set reused at every rate. |
 | `--vaccination-sweep-csv PATH` | Where every individual replicate is written. |
 | `--vaccination-sweep-summary-csv PATH` | Where the one-row-per-rate summary is written. |
-| `--vaccination-sweep-plot PATH` | Optional dose-response plot (attack rate / invasion / major-outbreak probability vs rate). |
-| `--major-outbreak-threshold` | `total_infected` cutoff for a "major outbreak" (default 20). |
+| `--vaccination-sweep-plot PATH` | Optional dose-response plot (attack rate / major-outbreak / invasion probability vs rate, all with 95% CI). |
+| `--major-outbreak-threshold` | `attack_rate` (fraction of total population ever infected) cutoff for a "major outbreak" (default `0.20`). This analysis's own definition, not a universal epidemiological constant. |
+| `--vaccination-sweep-max-days` | Safety cap on simulated days per sweep run (default 500), independent of `--simulation-days`; a run is flagged `duration_censored` if still active (E+I>0) when this cap is hit. |
 
 ### Visualization
 | Parameter | Default | Meaning |
@@ -363,6 +365,82 @@ hesitancy, demographic targeting, vaccination campaigns during an active
 outbreak, contact tracing, or multiple vaccine types — those are possible
 future extensions, not part of this milestone.
 
+### Cluster-Specific Vaccination
+
+An optional, additional layer on top of the vaccination feature above: instead
+of one uniform rate across the whole population, each cluster of the
+`clustered` contact model can get its *own* vaccination rate. It is entirely
+opt-in — a run that doesn't pass `--cluster-vaccination-rates` behaves exactly
+as before (uniform `--vaccination-rate`, or no vaccination at all).
+
+- **"Cluster-specific", not necessarily "geographic".** The `clustered`
+  contact model's clusters are local neighbourhoods/communities in the
+  contact network (see [Contact Network](#contact-network) above) — they are
+  not tied to any geographic coordinate. This feature lets
+  you vaccinate one community more than another (e.g. modeling differential
+  uptake or differential targeting across communities), not "vaccinate this
+  physical region." A regional (multi-city) run's *cities* are a separate,
+  coarser notion of place; cluster-specific rates apply *within* a single
+  clustered city's internal clusters.
+- **How to enable it**: pass `--cluster-vaccination-rates` as a comma-separated
+  list with exactly one rate (0–1) per cluster, ordered by cluster id, e.g.
+  for `--num-clusters 3`:
+  ```bash
+  python main.py --single-city --population-size 2000 --contact-model clustered \
+      --num-clusters 3 --cluster-vaccination-rates "0,0.2,0.6" \
+      --vaccination-strategy random --simulation-days 60
+  ```
+  This disables cluster 0, vaccinates ~20% of cluster 1, and ~60% of cluster 2
+  — each computed from *that cluster's own population*, not the whole city's.
+  Setting `--cluster-vaccination-rates` makes `--vaccination-rate` irrelevant
+  for that run (the uniform path is not used at all).
+- **Selection within each cluster** uses the same `--vaccination-strategy` as
+  ordinary vaccination (`random` or `high-degree`/`high_degree`), but applied
+  *independently inside each cluster* — there is no cross-cluster selection,
+  nobody is ever vaccinated twice, and a cluster's count can never exceed its
+  own population. `high-degree` ranks each cluster's members by degree in the
+  full pre-outbreak contact graph (computed once and reused, not recomputed
+  per cluster — see the performance note below), restricted to that cluster's
+  member ids.
+- **Per-cluster counts use the same rounding as uniform vaccination**:
+  `round(rate * cluster_population)`.
+- **Overall coverage is a weighted total, not the average of the rates.**
+  Because clusters can be different sizes, `overall_vaccination_rate` is
+  computed as `total_vaccinated / total_population`, which is *not* the same
+  as the arithmetic mean of the per-cluster rates when clusters are
+  unequal-sized. For example, cluster sizes `(50, 100, 200)` with rates
+  `(0, 0.2, 0.6)` vaccinate `(0, 20, 120)` people, for an overall rate of
+  `140 / 350 ≈ 40%` — not the `(0 + 0.2 + 0.6) / 3 ≈ 27%` a naive mean would
+  suggest.
+- **What the output records**: `Simulation.vaccination_report()` (and
+  `City.vaccination_report()`) gains `cluster_vaccination_rates` (the
+  requested rates), `vaccinated_count_per_cluster` and
+  `population_per_cluster` (both dicts keyed by cluster id), plus
+  `vaccinated_count` and `overall_vaccination_rate` (present for every run,
+  cluster-specific or not — aliases of the existing `number_vaccinated` /
+  `vaccination_coverage`). The console summary prints a per-cluster
+  breakdown underneath the overall coverage line. Visualization is unchanged:
+  the `clustered` contact model already lays out and colors clusters
+  distinctly, and vaccinated individuals already render in their own color
+  (see [Vaccination](#vaccination) above) — cluster-specific runs need no
+  extra visualization work.
+- **Performance**: cluster membership (`cluster_of`) is assigned once at
+  network-construction time and never recomputed; degree for `high-degree`
+  is likewise computed once over the whole graph (reusing the same one-time
+  approach as ordinary `high-degree` vaccination) and then restricted to each
+  cluster's node set, rather than rescanning the graph per cluster. This
+  keeps the feature practical at populations up to ~100,000.
+- **Validation**: `--cluster-vaccination-rates` must have exactly one entry
+  per cluster, every entry must be in `[0, 1]`, and the contact model must be
+  `clustered` (or the relevant regional city must be in `--clustered-cities`)
+  — any other case raises a clear `ValueError` rather than silently
+  coercing or ignoring the option.
+- **Not implemented** (same scope limits as ordinary vaccination, plus):
+  outbreak-time/adaptive vaccination, contact tracing, traveler-specific
+  vaccination, vaccine waning/partial efficacy/multiple vaccine types,
+  automatic/ML-based allocation across clusters, and changing cluster
+  membership.
+
 ### Vaccination Coverage Experiment
 
 A dose-response experiment: run many replicates at each of several
@@ -376,28 +454,49 @@ python main.py --regional --number-of-cities 2 --population-per-city 50 \
   --vaccination-coverage-sweep --vaccination-sweep-runs 5
 ```
 
-**Full 0–60% experiment** (13 rates × 500 replicates = 6,500 simulations —
+**Full 0–60% experiment** (6 rates × 150 replicates = 900 simulations —
 budget real time for this; see Performance below):
 ```bash
 python main.py --regional --number-of-cities 2 --population-per-city 50 \
-  --vaccination-coverage-sweep --vaccination-sweep-runs 500 \
+  --vaccination-coverage-sweep --vaccination-sweep-runs 150 \
   --vaccination-sweep-csv vaccination_runs.csv \
   --vaccination-sweep-summary-csv vaccination_summary.csv \
   --vaccination-sweep-plot vaccination_dose_response.png
 ```
-Omit `--vaccination-rates` to use the default 13 points (`0.00, 0.05, ...,
-0.60`); pass a comma-separated list (e.g. `--vaccination-rates 0,0.1,0.2,0.3`)
-to sweep a different set. Every rate reuses the same
-`--vaccination-sweep-base-seed .. + --vaccination-sweep-runs - 1` seed set
-(common random numbers), so differences between rates reflect the swept
-coverage, not seed noise.
+Omit `--vaccination-rates` to use the default 6 points (`0.00, 0.05, 0.10,
+0.20, 0.40, 0.60`); pass a comma-separated list (e.g.
+`--vaccination-rates 0,0.1,0.2,0.3`, or equivalently as percents,
+`--vaccination-rates 0,10,20,30` — if every value given is `> 1` the whole
+list is treated as percents and divided by 100, so a bare `5` always means
+5% and never 500%) to sweep a different set. `--vaccination-sweep-runs` is
+fully configurable (100/150/200/250/... or any value). Every rate reuses the
+same `--vaccination-sweep-base-seed .. + --vaccination-sweep-runs - 1` seed
+set (common random numbers), so differences between rates reflect the swept
+coverage, not seed noise, and the sweep is reproducible: the same config +
+rates + run count + base seed always reproduce the same per-run results.
+`--vaccination-sweep-max-days` (default `500`) is an independent safety cap
+on simulated days per run, overriding `--simulation-days` for the sweep only
+— every run continues until no `EXPOSED`/`INFECTIOUS` individuals remain
+(true extinction) or this cap is hit (in which case it is flagged
+`duration_censored`), not just until `INFECTIOUS` reaches 0 while `EXPOSED`
+is still nonzero.
 
 **Definitions used in the output:**
 - **`vaccination_rate`**: fraction of each city's population vaccinated
   before the outbreak begins (see [Vaccination](#vaccination)).
-- **Major outbreak**: `total_infected >= 20` for that replicate (the
-  `--major-outbreak-threshold` default; change it explicitly if you want a
-  different cutoff — it is never changed silently).
+- **Major outbreak**: `attack_rate >= 0.20` for that replicate (the
+  `--major-outbreak-threshold` default, now expressed as a *fraction of
+  total population* rather than a raw infection count — a fixed head-count
+  threshold meant something different at every population size, which was a
+  real bug fixed in the reliability/correctness milestone; see
+  `CHANGELOG_RESEARCH.md`). `attack_rate = total_infected / total_population`
+  where `total_infected` counts only individuals ever `EXPOSED`/`INFECTIOUS`/
+  recovered-from-infection (never vaccinated-but-uninfected people, never
+  double-counted) and `total_population` sums every city's full population
+  (regional: across all cities). This 20% cutoff is **this analysis's own
+  chosen definition, not a universal epidemiological constant** — change it
+  explicitly via `--major-outbreak-threshold` if you want a different one; it
+  is never changed silently.
 - **Invasion probability**: the fraction of *all* replicates at a rate in
   which the outbreak reached at least one city beyond the seed city
   (`cities_reached > 1` — "City-2 invasion" in the 2-city setup). A run
@@ -406,7 +505,34 @@ coverage, not seed noise.
 - **Arrival delay (`mean_arrival_delay_successful`)**: the mean days-to-
   arrival, computed **only** over replicates that actually invaded
   (`successful_invasions` gives that count) — a non-invading replicate has
-  no arrival day and is excluded, not coerced to `-1` or `0`.
+  no arrival day and is excluded, left as `NaN` rather than coerced to `-1`
+  or `0`, so this and every other conditional metric always reports the
+  sample size (`n`) it was actually computed over.
+
+**Termination metadata** (per replicate, in `--vaccination-sweep-csv`):
+alongside `duration_censored` (unchanged, already derived from the true
+final day's state), each row also has `final_exposed`, `final_infectious`
+(the last recorded day's counts), `extinction_reached` (`True` iff both are
+`0`), `actual_days_run` (the day the run actually stopped on),
+`simulation_max_days` (the configured cap, for context), `termination_reason`
+(`"extinction"` or `"max_days"`), and `major_outbreak` (the `attack_rate >=
+0.20` flag, precomputed so raw and summary agree by construction). These are
+purely additive, read-only-auditable fields — no stopping/counting logic
+changed when they were added (see `CHANGELOG_RESEARCH.md`). A row's
+`extinction_reached` and `duration_censored` always disagree (one or the
+other), and `extinction_reached=True` implies `final_exposed ==
+final_infectious == 0`.
+
+**Data-quality audit**: `python audit_experiment.py <runs.csv>
+[<summary.csv>] --expected-rates 0.00 0.05 0.10 0.20 0.40 0.60
+--expected-replicates 150 --expected-population 2000 --expected-cities 2`
+checks replicate/seed structure, population/city counts,
+`attack_rate`/`major_outbreak` arithmetic, raw-vs-summary agreement
+(major-outbreak and censored counts), `cities_reached`/arrival-delay
+invariants, and termination-field consistency, printing a PASS/FAIL report
+naming every failed check and the affected seeds/rates. A check against a
+CSV that predates the termination-metadata columns above is reported as
+"cannot be checked" rather than silently passed or failed.
 
 **Output files:**
 - `--vaccination-sweep-csv` (default `vaccination_coverage_runs.csv`): one
@@ -415,23 +541,31 @@ coverage, not seed noise.
   summary statistic can be recomputed later without rerunning.
 - `--vaccination-sweep-summary-csv` (default
   `vaccination_coverage_summary.csv`): one row per vaccination rate —
-  `n_runs`, mean/median attack rate with 95% CI, mean peak infectious/
-  epidemic duration with CI, invasion probability with CI, major-outbreak
-  count/percent/median attack rate, plus a major-outbreaks-only breakdown
-  (`major_outbreak_mean_*`) and censoring visibility (`n_censored`,
+  `n_runs`, mean/median attack rate with 95% (normal-approximation) CI, mean
+  peak infectious/epidemic duration with CI (descriptive only — see the
+  censoring caveat below), invasion probability with a **95% Wilson score
+  CI** (not a normal-approximation CI — the normal approximation can produce
+  a zero-width or out-of-range interval exactly when a rate has 0 or all
+  qualifying runs, which happens routinely at high coverage), major-outbreak
+  count/percent/Wilson CI/median attack rate, plus a major-outbreaks-only
+  breakdown (`major_outbreak_mean_*`) and censoring visibility (`n_censored`,
   `censored_fraction` — see `epidemic_stats.is_duration_censored`; a
-  censored run's duration is a lower bound, not a true extinction time, and
-  is never silently averaged in as if it were one).
-- `--vaccination-sweep-plot` (optional): a 3-panel PNG — attack rate,
-  invasion probability (both with 95% CI error bars), and major-outbreak
-  probability, each against vaccination rate.
+  censored run's duration **and** its recorded attack rate are lower bounds,
+  not final/true values, and are never silently averaged in as if they were
+  final).
+- `--vaccination-sweep-plot` (optional): a 3-panel PNG — mean attack rate,
+  major-outbreak probability, and regional invasion probability, each against
+  vaccination coverage, all three with 95% CI error bars, explicit axis
+  units/sample size (`n` replicates/rate) in the title, the 20%-threshold
+  panel noting it is this analysis's own definition, and any rate with
+  >=10% of its runs censored annotated directly on the attack-rate panel.
 
 **Performance**: each replicate is one full regional simulation; the full
-13-rate × 500-run experiment is 6,500 simulations and will take a while (a
-5-run smoke test on this machine took a few seconds per rate — scale that up
-to estimate your own runtime before launching the full sweep). No
-parallelism is used (none exists elsewhere in this project), so start with a
-small `--vaccination-sweep-runs` to validate your configuration first.
+6-rate × 150-run experiment is 900 simulations (a 5-run smoke test on this
+machine took a few seconds per rate — scale that up to estimate your own
+runtime before launching the full sweep). No parallelism is used (none
+exists elsewhere in this project), so start with a small
+`--vaccination-sweep-runs` to validate your configuration first.
 
 **Methodological note**: this experiment compares outcomes across
 vaccination coverage levels for *this simulated population and contact

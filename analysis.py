@@ -124,6 +124,45 @@ def mean_and_ci(values: Sequence[float]) -> Tuple[float, float, float]:
     return mean, std, half_width
 
 
+def wilson_ci(successes: int, n: int, z: float = 1.96) -> Tuple[float, float]:
+    """Return a 95%-by-default Wilson score confidence interval for a binomial
+    proportion ``successes / n``.
+
+    Used (instead of :func:`mean_and_ci`'s normal approximation) for any
+    proportion derived from a 0/1 indicator over a finite number of runs --
+    e.g. invasion probability, major-outbreak probability -- because the
+    normal approximation can produce nonsensical bounds outside ``[0, 1]`` or
+    a zero-width interval when the observed proportion is exactly ``0`` or
+    ``1`` (both of which happen routinely here: many vaccination-coverage
+    rates have zero major outbreaks in a modest number of replicates). The
+    Wilson interval stays inside ``[0, 1]`` by construction and remains
+    sensible at the extremes.
+
+    Args:
+        successes: Number of "successes" (e.g. runs classified as a major
+            outbreak), ``0 <= successes <= n``.
+        n: Total number of trials (e.g. total replicates at this rate).
+        z: Standard-normal critical value (default ``1.96``, i.e. 95%).
+
+    Returns:
+        ``(low, high)`` bounds in ``[0, 1]``. ``(nan, nan)`` if ``n == 0``.
+    """
+    if n <= 0:
+        return float("nan"), float("nan")
+    if successes <= 0:
+        phat = 0.0
+    elif successes >= n:
+        phat = 1.0
+    else:
+        phat = successes / n
+    denom = 1.0 + z ** 2 / n
+    centre = phat + z ** 2 / (2 * n)
+    half_width = z * np.sqrt(phat * (1 - phat) / n + z ** 2 / (4 * n ** 2))
+    low = (centre - half_width) / denom
+    high = (centre + half_width) / denom
+    return max(0.0, float(low)), min(1.0, float(high))
+
+
 def evaluate_interventions(
     base_config: Config,
     interventions: Sequence[InterventionSpec],

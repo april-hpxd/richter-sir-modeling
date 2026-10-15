@@ -36,6 +36,7 @@ from config import (CONTACT_MODELS, INITIAL_INFECTION_POLICIES,
                    VACCINATION_STRATEGIES, Config)
 from experiments import (
     DEFAULT_MAJOR_OUTBREAK_THRESHOLD, DEFAULT_VACCINATION_COVERAGE_RATES,
+    DEFAULT_VACCINATION_COVERAGE_REPLICATES,
     print_experiment_report, print_vaccination_coverage_report,
     run_experiment, run_scenario_comparison, run_sensitivity_analysis,
     run_travel_rate_sweep, run_vaccination_coverage_sweep,
@@ -197,6 +198,18 @@ def build_parser() -> argparse.ArgumentParser:
                              choices=VACCINATION_STRATEGIES,
                              default=d.vaccination_strategy,
                              help="How vaccinated individuals are chosen.")
+    vaccination.add_argument("--cluster-vaccination-rates", default=None,
+                             metavar="R0,R1,...",
+                             help="Optional per-cluster vaccination rates, "
+                                  "e.g. '0,0.2,0.6' for 3 clusters. Requires "
+                                  "the 'clustered' contact model and exactly "
+                                  "one rate per cluster (see --num-clusters). "
+                                  "Replaces --vaccination-rate entirely for "
+                                  "this run; each cluster is vaccinated at "
+                                  "its own rate (strategy still controlled by "
+                                  "--vaccination-strategy, applied within "
+                                  "each cluster). Omit for ordinary uniform "
+                                  "vaccination (unchanged default behavior).")
 
     exp = p.add_argument_group("experiments")
     exp.add_argument("--experiment", type=int, default=0, metavar="N",
@@ -264,11 +277,18 @@ def build_parser() -> argparse.ArgumentParser:
                                 "every rate).")
     vax_sweep.add_argument("--vaccination-rates", default=None,
                            help="Comma-separated vaccination rates to sweep, "
-                                "e.g. '0,0.1,0.2,0.3'. Defaults to "
-                                "0.00, 0.05, ..., 0.60 (13 points).")
-    vax_sweep.add_argument("--vaccination-sweep-runs", type=int, default=500,
-                           help="Replicates per rate. Use a small value "
-                                "(e.g. 5) for a quick test before a full run.")
+                                "as fractions ('0,0.1,0.2,0.3') or, "
+                                "equivalently, as percents ('0,10,20,30') -- "
+                                "if every value given is > 1 they are treated "
+                                "as percents and divided by 100, so '5' means "
+                                "5%% (0.05), never 500%%. Defaults to "
+                                "0.00, 0.05, 0.10, 0.20, 0.40, 0.60 (6 points).")
+    vax_sweep.add_argument("--vaccination-sweep-runs", type=int,
+                           default=DEFAULT_VACCINATION_COVERAGE_REPLICATES,
+                           help="Replicates per rate (default 150; 6 default "
+                                "rates x 150 = 900 total runs). Use a small "
+                                "value (e.g. 5) for a quick test before a "
+                                "full run.")
     vax_sweep.add_argument("--vaccination-sweep-base-seed", type=int, default=0,
                            help="First seed of the shared seed set reused at "
                                 "every rate.")
@@ -284,10 +304,22 @@ def build_parser() -> argparse.ArgumentParser:
                            help="If given, save a dose-response plot (attack "
                                 "rate / invasion probability / major-outbreak "
                                 "probability vs vaccination rate) to this path.")
-    vax_sweep.add_argument("--major-outbreak-threshold", type=int,
+    vax_sweep.add_argument("--major-outbreak-threshold", type=float,
                            default=DEFAULT_MAJOR_OUTBREAK_THRESHOLD,
-                           help="total_infected threshold defining a 'major "
-                                "outbreak' in the sweep's analysis.")
+                           help="attack_rate (cumulative infections / total "
+                                "population) fraction defining a 'major "
+                                "outbreak' in the sweep's analysis (default "
+                                "0.20 -- this analysis's chosen cutoff, not a "
+                                "universal epidemiological constant).")
+    vax_sweep.add_argument("--vaccination-sweep-max-days", type=int, default=500,
+                           help="Safety cap on simulated days for every run "
+                                "in the sweep (overrides --simulation-days "
+                                "for this mode only), so an extinction-based "
+                                "stopping condition (run until no EXPOSED or "
+                                "INFECTIOUS individuals remain) cannot run "
+                                "unbounded. Each run is also flagged as "
+                                "'censored' if it is still active when this "
+                                "cap is hit (see duration_censored).")
 
     out = p.add_argument_group("visualization and output")
     out.add_argument("--visualization-mode",
@@ -355,6 +387,18 @@ def config_from_args(args: argparse.Namespace) -> Config:
         clustered_cities = tuple(
             int(c.strip()) for c in args.clustered_cities.split(",") if c.strip())
 
+    cluster_vaccination_rates = None
+    if args.cluster_vaccination_rates:
+        try:
+            cluster_vaccination_rates = tuple(
+                float(r.strip()) for r in args.cluster_vaccination_rates.split(",")
+                if r.strip())
+        except ValueError as exc:
+            raise ValueError(
+                "--cluster-vaccination-rates must be a comma-separated list "
+                f"of numbers, e.g. '0,0.2,0.6' (got {args.cluster_vaccination_rates!r}): {exc}"
+            ) from exc
+
     return Config(
         population_size=args.population_size,
         daily_contacts=args.daily_contacts,
@@ -392,6 +436,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         isolation_contact_multiplier=args.isolation_contact_multiplier,
         vaccination_rate=args.vaccination_rate,
         vaccination_strategy=args.vaccination_strategy,
+        cluster_vaccination_rates=cluster_vaccination_rates,
     )
 
 
@@ -419,8 +464,16 @@ def print_report(simulation: Simulation, config: Config) -> None:
     vacc = simulation.vaccination_report()
     if vacc["vaccination_enabled"]:
         print(f"  Vaccination:         {vacc['number_vaccinated']} "
-              f"({100 * vacc['vaccination_coverage']:.1f}% coverage, "
+              f"({100 * vacc['vaccination_coverage']:.1f}% overall coverage, "
               f"strategy: {vacc['vaccination_strategy']})")
+        if vacc.get("cluster_vaccination_rates") is not None:
+            per_cluster = vacc["vaccinated_count_per_cluster"]
+            pop_per_cluster = vacc["population_per_cluster"]
+            for cluster_id, rate in enumerate(vacc["cluster_vaccination_rates"]):
+                print(f"    cluster {cluster_id}: "
+                      f"{per_cluster.get(cluster_id, 0)}/"
+                      f"{pop_per_cluster.get(cluster_id, 0)} "
+                      f"(requested rate {rate:.2f})")
     print("=" * 48 + "\n")
 
 
@@ -737,17 +790,31 @@ def run_vaccination_coverage_mode(config: Config, args: argparse.Namespace) -> N
         args: The parsed command-line arguments.
     """
     if args.vaccination_rates:
-        rates = tuple(float(r.strip()) for r in args.vaccination_rates.split(",")
-                     if r.strip())
+        raw_rates = [float(r.strip()) for r in args.vaccination_rates.split(",")
+                    if r.strip()]
+        # Percent-input safety: if every value is > 1 it cannot be a fraction
+        # (fractions are capped at 1.0 by Config's own validation), so treat
+        # the whole list as percents and divide by 100 -- this is what keeps
+        # a user-entered "5" meaning 5% (0.05), never 500%.
+        if raw_rates and all(r > 1.0 for r in raw_rates):
+            raw_rates = [r / 100.0 for r in raw_rates]
+        rates = tuple(raw_rates)
     else:
         rates = DEFAULT_VACCINATION_COVERAGE_RATES
     num_runs = args.vaccination_sweep_runs
     base_seed = args.vaccination_sweep_base_seed
+    # Safety cap for the extinction-based stopping condition (run until no
+    # EXPOSED/INFECTIOUS remain): overrides --simulation-days for this mode
+    # only, so a per-rate sweep never silently inherits a horizon too short
+    # to let slow-burning outbreaks reach true extinction.
+    sweep_config = config.with_overrides(
+        simulation_days=args.vaccination_sweep_max_days)
     print(f"Running vaccination-coverage sweep: {len(rates)} rates x "
           f"{num_runs} runs = {len(rates) * num_runs} simulations "
-          f"(seeds {base_seed}..{base_seed + num_runs - 1} at every rate)...")
+          f"(seeds {base_seed}..{base_seed + num_runs - 1} at every rate, "
+          f"max {args.vaccination_sweep_max_days} days/run)...")
     runs = run_vaccination_coverage_sweep(
-        config, vaccination_rates=rates, num_runs=num_runs,
+        sweep_config, vaccination_rates=rates, num_runs=num_runs,
         base_seed=base_seed, verbose=not args.quiet)
     write_vaccination_coverage_runs_csv(runs, args.vaccination_sweep_csv)
     summary_rows = summarize_vaccination_coverage(
@@ -759,7 +826,8 @@ def run_vaccination_coverage_mode(config: Config, args: argparse.Namespace) -> N
     if args.vaccination_sweep_plot:
         visualization.plot_vaccination_dose_response(
             summary_rows, save_path=args.vaccination_sweep_plot,
-            show=args.show)
+            show=args.show,
+            major_outbreak_threshold=args.major_outbreak_threshold)
 
 
 def run_validation_mode(args: argparse.Namespace) -> None:

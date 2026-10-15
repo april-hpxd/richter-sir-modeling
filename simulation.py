@@ -21,7 +21,7 @@ from engine import DiseaseEngine
 from interaction import (
     build_contact_model,
 )
-from vaccination import vaccinate, vaccination_report
+from vaccination import vaccinate, vaccinate_cluster, vaccination_report
 
 
 @dataclass
@@ -93,13 +93,27 @@ class Simulation:
         # disabled, so an unconfigured run's random stream -- and therefore
         # its whole trajectory -- is bit-for-bit unchanged from before
         # vaccination existed.
-        vaccination_count = config.resolved_vaccination_count(
-            config.population_size)
-        self.vaccinated_ids: List[int] = (
-            vaccinate(self.engine.individuals, vaccination_count, self.rng,
-                     strategy=config.vaccination_strategy,
-                     graph=getattr(self.engine.contact_model, "graph", None))
-            if vaccination_count else [])
+        # Optional cluster-specific vaccination (one rate per cluster)
+        # replaces the uniform-rate path entirely when configured; otherwise
+        # behavior is byte-for-byte identical to before this feature existed.
+        self.cluster_vaccinated_count: Optional[dict] = None
+        self.cluster_population: Optional[dict] = None
+        if config.cluster_vaccination_rates is not None:
+            cluster_of = getattr(self.engine.contact_model, "cluster_of", None)
+            (self.vaccinated_ids, self.cluster_vaccinated_count,
+             self.cluster_population) = vaccinate_cluster(
+                self.engine.individuals, cluster_of,
+                config.cluster_vaccination_rates, self.rng,
+                strategy=config.vaccination_strategy,
+                graph=getattr(self.engine.contact_model, "graph", None))
+        else:
+            vaccination_count = config.resolved_vaccination_count(
+                config.population_size)
+            self.vaccinated_ids: List[int] = (
+                vaccinate(self.engine.individuals, vaccination_count, self.rng,
+                         strategy=config.vaccination_strategy,
+                         graph=getattr(self.engine.contact_model, "graph", None))
+                if vaccination_count else [])
 
         # Seed patient zeros as EXPOSED and record the day-0 baseline. The
         # count is resolved from the configured initial-infection policy
@@ -197,6 +211,9 @@ class Simulation:
             strategy=self.config.vaccination_strategy,
             vaccinated_ids=self.vaccinated_ids,
             population_size=self.config.population_size,
+            cluster_vaccination_rates=self.config.cluster_vaccination_rates,
+            vaccinated_count_per_cluster=self.cluster_vaccinated_count,
+            population_per_cluster=self.cluster_population,
         )
 
     def network_report(self):

@@ -1000,29 +1000,43 @@ def animate_regional_clusters(regional_sim: "RegionalSimulation",
 # 
 def plot_vaccination_dose_response(summary_rows: List[Dict],
                                    save_path: Optional[str] = None,
-                                   show: bool = False) -> plt.Figure:
+                                   show: bool = False,
+                                   major_outbreak_threshold: float = 0.20
+                                   ) -> plt.Figure:
     """Plot the vaccination-coverage dose-response summary (3 panels).
 
     One row of ``summary_rows`` per vaccination rate, as produced by
     ``experiments.summarize_vaccination_coverage``. Panels: attack rate,
-    invasion probability, and major-outbreak probability, each against
-    vaccination rate, with 95% CI error bars where the underlying summary
-    computed one (attack rate, invasion probability; major-outbreak
-    probability has no CI in this milestone's summary, so it is plotted
-    without error bars).
+    major-outbreak probability, and regional invasion probability, each
+    against vaccination rate (with explicit units/sample size ``n`` in the
+    x-axis label), with 95% CI error bars on all three (attack rate: normal-
+    approximation CI on the mean; invasion/major-outbreak probability: Wilson
+    score CI on the proportion -- see ``analysis.wilson_ci``). A rate with a
+    non-trivial fraction of runs still active at the simulation horizon
+    (right-censored) is annotated on the attack-rate panel, since a censored
+    run's duration -- and therefore how "final" its attack rate is -- is a
+    lower bound, not a settled outcome.
 
     Args:
         summary_rows: The per-rate summary dicts.
         save_path: If given, save the figure to this image path.
         show: If ``True``, display the figure.
+        major_outbreak_threshold: The attack-rate cutoff used to classify a
+            "major outbreak" in this summary (for the panel title only --
+            purely cosmetic, does not change any computed value). Default
+            ``0.20``: this analysis's own chosen definition, not a universal
+            epidemiological constant.
 
     Returns:
         The created :class:`matplotlib.figure.Figure`.
     """
     rates = [100 * row["vaccination_rate"] for row in summary_rows]
+    n_runs = summary_rows[0]["n_runs"] if summary_rows else 0
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
-    fig.suptitle("Vaccination coverage: dose-response", fontsize=13, weight="bold")
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
+    fig.suptitle(
+        f"Vaccination coverage: dose-response (n={n_runs} replicates/rate)",
+        fontsize=13, weight="bold")
 
     attack = [100 * row["mean_attack_rate"] for row in summary_rows]
     attack_err = [
@@ -1031,31 +1045,51 @@ def plot_vaccination_dose_response(summary_rows: List[Dict],
     ]
     axes[0].errorbar(rates, attack, yerr=attack_err, marker="o",
                      color=STATE_COLOR[State.INFECTIOUS], capsize=3)
-    axes[0].set_title("Attack rate", fontsize=11, weight="bold")
-    axes[0].set_xlabel("Vaccination rate (%)")
-    axes[0].set_ylabel("Attack rate (%)")
+    axes[0].set_title("Mean attack rate", fontsize=11, weight="bold")
+    axes[0].set_xlabel("Vaccination coverage (%)")
+    axes[0].set_ylabel("Attack rate (%, 95% CI)")
     axes[0].grid(alpha=0.3)
+    # Flag rates with substantial censoring directly on the plot -- a
+    # censored run's duration (and the attack rate at the point it was cut
+    # off) is a lower bound, not a final outcome.
+    censored_rates = [(r, row) for r, row in zip(rates, summary_rows)
+                      if row.get("censored_fraction", 0) and row["censored_fraction"] >= 0.1]
+    if censored_rates:
+        for r, row in censored_rates:
+            axes[0].annotate(f"{row['n_censored']}/{row['n_runs']}\ncensored",
+                             xy=(r, 100 * row["mean_attack_rate"]),
+                             xytext=(0, 10), textcoords="offset points",
+                             fontsize=7, ha="center", color="firebrick")
+
+    major = [row["major_outbreak_percent"] for row in summary_rows]
+    major_err = [
+        [row["major_outbreak_percent"] - row.get("major_outbreak_ci_low", row["major_outbreak_percent"])
+         for row in summary_rows],
+        [row.get("major_outbreak_ci_high", row["major_outbreak_percent"]) - row["major_outbreak_percent"]
+         for row in summary_rows],
+    ]
+    axes[1].errorbar(rates, major, yerr=major_err, marker="o",
+                     color=STATE_COLOR[State.VACCINATED], capsize=3)
+    axes[1].set_title(
+        f"Major-outbreak probability\n(attack rate >= {major_outbreak_threshold:.0%}, "
+        "this analysis's definition)", fontsize=10, weight="bold")
+    axes[1].set_xlabel("Vaccination coverage (%)")
+    axes[1].set_ylabel("Major-outbreak runs (%, 95% Wilson CI)")
+    axes[1].grid(alpha=0.3)
 
     invasion = [100 * row["invasion_probability"] for row in summary_rows]
     invasion_err = [
         [100 * (row["invasion_probability"] - row["invasion_ci_low"]) for row in summary_rows],
         [100 * (row["invasion_ci_high"] - row["invasion_probability"]) for row in summary_rows],
     ]
-    axes[1].errorbar(rates, invasion, yerr=invasion_err, marker="o",
+    axes[2].errorbar(rates, invasion, yerr=invasion_err, marker="o",
                      color=STATE_COLOR[State.EXPOSED], capsize=3)
-    axes[1].set_title("Invasion probability", fontsize=11, weight="bold")
-    axes[1].set_xlabel("Vaccination rate (%)")
-    axes[1].set_ylabel("Invasion probability (%)")
-    axes[1].grid(alpha=0.3)
-
-    major = [row["major_outbreak_percent"] for row in summary_rows]
-    axes[2].plot(rates, major, marker="o", color=STATE_COLOR[State.VACCINATED])
-    axes[2].set_title("Major outbreak probability", fontsize=11, weight="bold")
-    axes[2].set_xlabel("Vaccination rate (%)")
-    axes[2].set_ylabel("Major outbreak runs (%)")
+    axes[2].set_title("Regional invasion probability", fontsize=11, weight="bold")
+    axes[2].set_xlabel("Vaccination coverage (%)")
+    axes[2].set_ylabel("Invasion probability (%, 95% Wilson CI)")
     axes[2].grid(alpha=0.3)
 
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
     if save_path:
         fig.savefig(save_path, dpi=120)
         print(f"Saved vaccination dose-response plot to {save_path}")

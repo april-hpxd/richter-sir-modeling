@@ -630,6 +630,10 @@ class City:
                 "day_outbreak_began": -1.0,
                 "day_outbreak_peaked": -1.0,
                 "imported_infections": float(self.imported_infections),
+                "final_exposed": 0.0,
+                "final_infectious": 0.0,
+                "extinction_reached": True,
+                "actual_days_run": 0,
             }
 
         final = self.history[-1]
@@ -677,4 +681,12 @@ class City:
             "day_outbreak_began": float(first_infection_day),
             "day_outbreak_peaked": float(peak_inf.day),
             "imported_infections": float(self.imported_infections),
+            # Explicit final-state fields, read directly off the last
+            # recorded day (the same record ``duration_censored`` above is
+            # derived from) so termination status is directly auditable
+            # without re-deriving it from ``duration_censored``.
+            "final_exposed": float(final.exposed),
+            "final_infectious": float(final.infectious),
+            "extinction_reached": bool((final.exposed + final.infectious) == 0),
+            "actual_days_run": int(final.day),
         }
